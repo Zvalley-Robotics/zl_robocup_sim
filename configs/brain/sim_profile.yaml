@@ -1,0 +1,23 @@
+# brain 仿真 profile（由 robocup_sim 在启动 brain 时通过 sim_profile:=<path> 注入）。
+# 实机不加载本文件；实机的 config.yaml/config_local.yaml 保持不变。
+brain_node:
+  ros__parameters:
+    ground_truth:
+      enable_pose: true
+      enable_ball: true
+      ball_timeout_sec: 1.0
+    zl_io:
+      # 仿真由 robocup_sim_bridge 发布逐机 perception/target_* 与 perception/ball，
+      # 关闭 brain 内的全局话题版本，避免六机互相覆盖。
+      kick_targets_enable: false
+      ball_fwd_enable: false
+    comm:
+      multi_instance: true
+    game:
+      number_of_players: 3
+    RLVisionKick:
+      enableAutoVisualKick: true
+      autoVisualKickEnableDistMin: 0.4
+      autoVisualKickEnableDistMax: 1.0
+    # 由 CLI 在渲染时替换为 match 主机 IP；同机为 127.0.0.1。
+    game_control_ip: "127.0.0.1"

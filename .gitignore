@@ -1,0 +1,31 @@
+# build / runtime
+/build/
+/install/
+/log/
+/logs/
+/runtime/
+*.log
+MUJOCO_LOG.TXT
+/robots.env
+
+# 本机私有配置覆盖（存在时优先于 roster.yaml / inventory.yaml）
+/roster.local.yaml
+/inventory.local.yaml
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# editor / OS
+.vscode/
+.DS_Store
+
+# upstream sync material（仅本地保留，不随仓库分发）
+/patches/
+/src/vendor_manifest.yaml
+/docs/vendor-provenance.md
+/tools/check_vendor.sh
+/tools/gen_vendor_manifest.py
+/tools/sync_from_zl_robot.sh
+/.githooks/

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CycloneDDS xmlns="https://cdds.io/config"
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:schemaLocation="https://cdds.io/config https://raw.githubusercontent.com/eclipse-cyclonedds/cyclonedds/master/etc/cyclonedds.xsd">
+  <!--
+    Local-only robot domain.
+    Use this mode when the robot process should be visible only to ROS nodes on
+    the same host. The ROS domain id is still selected by ROS_DOMAIN_ID.
+
+    2026-11-04：副本自 zl_robot/config/cyclonedds_localhost.xml（zl_robot 解绑后仓库自带，
+    供 start_brain_multi.sh 等本机联调画像使用）。语义需与同事仓库保持一致。
+  -->
+  <Domain Id="any">
+    <General>
+      <Interfaces>
+        <NetworkInterface name="lo" multicast="false"/>
+      </Interfaces>
+      <AllowMulticast>false</AllowMulticast>
+      <MulticastRecvNetworkInterfaceAddresses>none</MulticastRecvNetworkInterfaceAddresses>
+    </General>
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>100</MaxAutoParticipantIndex>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

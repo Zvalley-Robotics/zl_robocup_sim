@@ -1,0 +1,39 @@
+# 设备清单：每台主机承载哪些角色，以及 control/brain 角色的外部工作区路径。
+#
+# 单机开发保持下面的 sim-host 即可（所有角色都在本机）。
+# 多设备部署时：
+#   1. 按实际 IP / 网卡增加 hosts，roles 决定该主机启动哪些角色；
+#   2. 把 dds.mode 改为 unicast（按 hosts 地址渲染跨机单播 Peers）；
+#   3. roster.yaml 里每台机器人的 control_host / brain_host 填对应主机名。
+# 路径中的 ~ 会展开为当前用户 HOME；也可用环境变量 ZL_ROOT / BRAIN_WS 覆盖。
+version: 1
+
+hosts:
+  sim-host:
+    address: 127.0.0.1          # 本机 IP；跨机部署时填实际地址
+    dds_iface: auto             # auto=按默认路由网卡；也可写 eth0 / enp3s0 等
+    roles: [sim, boundary, match, control, brain]
+    zl_root: ~/zl_robot_lite         # zl_robot 运控工作区（--role control 需要）
+    brain_ws: ~/robocup_brain_demo    # brain/策略工作区（--role brain 需要）
+
+  # 多设备示例：取消注释并按实际网络/路径修改。
+  # control-2:
+  #   address: 192.168.1.11
+  #   dds_iface: auto
+  #   roles: [control]
+  #   zl_root: ~/zl_robot
+  # brain-2:
+  #   address: 192.168.1.21
+  #   dds_iface: auto
+  #   roles: [brain]
+  #   brain_ws: ~/robocup_demo
+
+domains:
+  internal: 10
+  external: 100
+
+dds:
+  # local=单机 lo 配置；unicast=按 inventory 地址渲染跨机单播 Peers。
+  # 单机开发保持 local；多设备部署改为 unicast。
+  mode: local
+  multicast: false

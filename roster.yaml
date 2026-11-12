@@ -1,0 +1,21 @@
+# 上场名单与角色（主配置）。
+# 默认 A 队 3 台（robot_01~03）；把 robot_04~06 的 enabled 改为 true 即为 6 台。
+# 队号：A=29；B 单队=30；A+B 同场时 B 自动改用 39（可在 match.mixed_b_team_id 覆盖）。
+# 运控的默认 RL 模型与 nav_mode 由 zl_robot 的 launch 决定，本文件不覆盖。
+#
+# control_host / brain_host 只在分设备启动（--role control / --role brain）时生效；
+# --role all 会忽略它们，在本机启动所有选中机器人。多设备时改为 inventory.yaml 中的主机名。
+
+match:
+  team_a_id: 29
+  team_b_id: 30
+  # 仅用于 referee_ui 的 GC 数据/罚下槽位；上场台数由 robots[].enabled 决定。
+  players_per_team: 3
+
+robots:
+  - {name: robot_01, team: A, player_id: 1, role: goal_keeper, enabled: true,  control_host: sim-host, brain_host: sim-host}
+  - {name: robot_02, team: A, player_id: 2, role: striker,     enabled: true,  control_host: sim-host, brain_host: sim-host}
+  - {name: robot_03, team: A, player_id: 3, role: striker,     enabled: true,  control_host: sim-host, brain_host: sim-host}
+  - {name: robot_04, team: B, player_id: 1, role: goal_keeper, enabled: false, control_host: sim-host, brain_host: sim-host}
+  - {name: robot_05, team: B, player_id: 2, role: striker,     enabled: false, control_host: sim-host, brain_host: sim-host}
+  - {name: robot_06, team: B, player_id: 3, role: striker,     enabled: false, control_host: sim-host, brain_host: sim-host}

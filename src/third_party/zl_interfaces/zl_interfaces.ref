@@ -1,0 +1,8 @@
+# zl_interfaces 冻结快照的来源（由 scripts/ref/sync_zl_interfaces.sh --apply 维护）
+repo: https://github.com/zhoujiechj/zl_robot
+branch: main
+commit: 75ef42422461e1fbd1000f0692728f1b7f5d2db9
+date: 2026-11-05
+packages: robot_interfaces (msg 22, srv 21), yesense_interface (msg 23)
+local_additions: yesense_interface/msg/NavAllStamped.msg（来自 zl_robot 工作区，用于 /imu/nav_all_stamped；上游提交后可重导移除）
+note: 根仓库自编译所需的最小接口集；仅冻结消息契约，不含实现与仿真

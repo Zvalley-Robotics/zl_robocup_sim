@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>robocup_sim_bringup</name>
+  <version>0.1.0</version>
+  <description>Launch files for the standalone RoboCup MuJoCo simulation.</description>
+  <maintainer email="robocup_sim@todo.todo">robocup_sim</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>sim_z01_std_robocup</exec_depend>
+  <exec_depend>mj_sim</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -1,0 +1,810 @@
+#!/usr/bin/env python3
+"""robocup_sim CLI：按角色启动/停止六机比赛仿真。
+
+默认单机全部角色：
+    ./robocup_sim up --role all --profile local
+
+分设备：
+    ./robocup_sim up --role sim        # 仿真机：MuJoCo + GT/感知 + domain_bridge + 比赛管理
+    ./robocup_sim up --role control    # 运控机：roster 中 control_host==本机 的机器人
+    ./robocup_sim up --role brain      # 策略机：roster 中 brain_host==本机 的机器人
+
+所有运行产物落在 runtime/<run_id>/（gitignore）。
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import signal
+import socket
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+
+import yaml
+
+ROOT = Path(__file__).resolve().parent
+RUNTIME = ROOT / "runtime"
+ROS_SETUP = "/opt/ros/humble/setup.bash"
+DEFAULT_ROSTER = ROOT / "roster.yaml"
+DEFAULT_INVENTORY = ROOT / "inventory.yaml"
+DEFAULT_ZL_ROOT = "~/zl_robot"
+DEFAULT_BRAIN_WS = "~/robocup_demo"
+
+
+def default_config(name: str, fallback: Path) -> str:
+    """优先使用本机私有覆盖 <name>.local.yaml（gitignore），避免把本机配置提交进仓库。"""
+    local = ROOT / f"{name}.local.yaml"
+    return str(local if local.is_file() else fallback)
+
+
+# --------------------------------------------------------------------- utils
+def external_path(env_key: str, cfg_value: str | None, default: str) -> Path:
+    """外部工作区路径：环境变量 > inventory > 默认值；支持 ~ 与 $VAR。"""
+    raw = os.environ.get(env_key) or cfg_value or default
+    return Path(os.path.expandvars(str(raw))).expanduser()
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"[robocup_sim][ERR] {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def info(msg: str) -> None:
+    print(f"[robocup_sim] {msg}")
+
+
+def load_yaml(path: Path) -> dict:
+    if not path.is_file():
+        die(f"找不到配置文件: {path}")
+    with path.open() as f:
+        return yaml.safe_load(f) or {}
+
+
+def local_ips() -> set[str]:
+    ips: set[str] = set()
+    try:
+        host = socket.gethostname()
+        for entry in socket.getaddrinfo(host, None):
+            ips.add(entry[4][0])
+    except OSError:
+        pass
+    try:
+        out = subprocess.check_output(["hostname", "-I"], text=True, timeout=3)
+        ips.update(out.split())
+    except (subprocess.SubprocessError, OSError):
+        pass
+    return ips
+
+
+def default_iface() -> str:
+    try:
+        out = subprocess.check_output(
+            ["ip", "route", "get", "1.1.1.1"], text=True, timeout=3)
+        m = re.search(r"\bdev\s+(\S+)", out)
+        if m:
+            return m.group(1)
+    except (subprocess.SubprocessError, OSError):
+        pass
+    return "eth0"
+
+
+def choose_host(inv: dict, explicit: str | None) -> str:
+    hosts = inv.get("hosts") or {}
+    if not hosts:
+        die("inventory.yaml 没有 hosts")
+    if explicit:
+        if explicit not in hosts:
+            die(f"inventory 中没有 host: {explicit}")
+        return explicit
+    ips = local_ips()
+    for name, cfg in hosts.items():
+        if str(cfg.get("address", "")) in ips:
+            return name
+    # 单机开发默认：第一个主机
+    first = next(iter(hosts))
+    info(f"未按 IP 匹配到 host，回退到 inventory 的第一个 host: {first}")
+    return first
+
+
+def selected_robots(roster: dict, names_csv: str | None) -> list[dict]:
+    robots = roster.get("robots") or []
+    if not robots:
+        die("roster.yaml 没有 robots")
+    if not names_csv:
+        selected = [r for r in robots if r.get("enabled", False)]
+    else:
+        wanted = [s.strip() for s in names_csv.replace(",", " ").split() if s.strip()]
+        by_name = {r["name"]: r for r in robots}
+        missing = [n for n in wanted if n not in by_name]
+        if missing:
+            die(f"roster 中没有机器人: {' '.join(missing)}")
+        selected = [by_name[n] for n in wanted]
+    if not selected:
+        die("没有可启动的机器人（检查 roster.yaml 的 enabled 或 --robots）")
+    return selected
+
+
+def active_team_ids(roster: dict, robots: list[dict]) -> dict[str, int]:
+    match = roster.get("match") or {}
+    a_id = int(match.get("team_a_id", 29))
+    b_id = int(match.get("team_b_id", 30))
+    has_a = any(str(r.get("team", "A")).upper() == "A" for r in robots)
+    has_b = any(str(r.get("team", "A")).upper() == "B" for r in robots)
+    if has_a and has_b:
+        # A+B 同场：避开 brain 队友单播端口族重叠（与旧 lib_players 口径一致）。
+        b_id = int(match.get("mixed_b_team_id", match.get("team_b_id_when_mixed", 39)))
+    return {"A": a_id, "B": b_id}
+
+
+def robot_team_id(team_ids: dict[str, int], robot: dict) -> int:
+    team = str(robot.get("team", "A")).upper()
+    return team_ids.get(team, team_ids["A"])
+
+
+def mask_of(robots: list[dict]) -> str:
+    names = {r["name"] for r in robots}
+    bits = []
+    for i in range(1, 7):
+        bits.append("1" if f"robot_{i:02d}" in names else "0")
+    return ",".join(bits)
+
+
+# --------------------------------------------------------------------- render
+DDS_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
+<CycloneDDS xmlns="https://cdds.io/config"
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:schemaLocation="https://cdds.io/config https://raw.githubusercontent.com/eclipse-cyclonedds/cyclonedds/master/etc/cyclonedds.xsd">
+  <Domain Id="any">
+    <General>
+      <Interfaces><NetworkInterface name="{iface}" multicast="false"/></Interfaces>
+      <AllowMulticast>false</AllowMulticast>
+      <MulticastRecvNetworkInterfaceAddresses>none</MulticastRecvNetworkInterfaceAddresses>
+    </General>
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>100</MaxAutoParticipantIndex>
+    </Discovery>
+  </Domain>
+{domain_sections}
+</CycloneDDS>
+"""
+
+
+def render_dds(path: Path, host: str, inv: dict, profile: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if profile == "local":
+        src = ROOT / "configs/dds/cyclonedds_localhost.xml"
+        path.write_text(src.read_text())
+        return
+    hosts = inv.get("hosts") or {}
+    cfg = hosts[host]
+    iface = cfg.get("dds_iface", "auto")
+    if iface in (None, "", "auto"):
+        iface = default_iface()
+    self_ip = str(cfg.get("address", "127.0.0.1"))
+    roles = set(cfg.get("roles") or [])
+    domains = inv.get("domains") or {}
+    dom10 = int(domains.get("internal", 10))
+    dom100 = int(domains.get("external", 100))
+
+    def peers_for(domain: int) -> list[str]:
+        out: list[str] = [self_ip]
+        for name, h in hosts.items():
+            h_roles = set(h.get("roles") or [])
+            participates = False
+            if domain == dom10:
+                participates = bool(h_roles & {"sim", "control", "match", "boundary"})
+            elif domain == dom100:
+                participates = bool(h_roles & {"brain", "match", "boundary"})
+            if participates:
+                ip = str(h.get("address", ""))
+                if ip and ip not in out:
+                    out.append(ip)
+        return out
+
+    sections = []
+    if roles & {"sim", "control", "match", "boundary"}:
+        peers = "\n".join(f"        <Peer address=\"{ip}\"/>" for ip in peers_for(dom10))
+        sections.append(
+            f"  <Domain Id=\"{dom10}\">\n    <Discovery>\n      <Peers>\n{peers}\n"
+            f"      </Peers>\n    </Discovery>\n  </Domain>")
+    if roles & {"brain", "match", "boundary"}:
+        peers = "\n".join(f"        <Peer address=\"{ip}\"/>" for ip in peers_for(dom100))
+        sections.append(
+            f"  <Domain Id=\"{dom100}\">\n    <Discovery>\n      <Peers>\n{peers}\n"
+            f"      </Peers>\n    </Discovery>\n  </Domain>")
+    path.write_text(DDS_TEMPLATE.format(iface=iface, domain_sections="\n".join(sections)))
+
+
+def render_bridge(path: Path, robots: list[dict], inv: dict) -> None:
+    """生成 domain_bridge 白名单（域 10 ↔ 域 100）。"""
+    domains = inv.get("domains") or {}
+    dom10 = int(domains.get("internal", 10))
+    dom100 = int(domains.get("external", 100))
+
+    def entry(topic: str, typ: str, src: int, dst: int, rel: str, depth: int) -> str:
+        return (
+            f"  {topic}:\n"
+            f"    type: {typ}\n"
+            f"    from_domain: {src}\n"
+            f"    to_domain: {dst}\n"
+            f"    qos:\n"
+            f"      reliability: {rel}\n"
+            f"      history: keep_last\n"
+            f"      depth: {depth}\n"
+        )
+
+    lines = [f"name: robocup_sim_bridge\n\ntopics:\n"]
+    for r in robots:
+        n = r["name"]
+        # 100 -> 10（brain 下发）
+        lines.append(entry(f"/{n}/cmd_vel", "geometry_msgs/msg/Twist", dom100, dom10, "best_effort", 5))
+        lines.append(entry(f"/{n}/input/intent", "robot_interfaces/msg/RobotIntent", dom100, dom10, "reliable", 10))
+        lines.append(entry(f"/{n}/external/head_control", "robot_interfaces/msg/HeadControl", dom100, dom10, "reliable", 10))
+        lines.append(entry(f"/soccer/brain_strategy/{n}", "std_msgs/msg/String", dom100, dom10, "reliable", 10))
+        # 10 -> 100（zl 上行 + GT）
+        lines.append(entry(f"/{n}/state", "robot_interfaces/msg/RobotState", dom10, dom100, "best_effort", 5))
+        lines.append(entry(f"/{n}/driver/joint_states", "robot_interfaces/msg/JointStates", dom10, dom100, "best_effort", 5))
+        lines.append(entry(f"/{n}/driver/status", "robot_interfaces/msg/DriverStatus", dom10, dom100, "best_effort", 5))
+        lines.append(entry(f"/{n}/imu/nav_all", "yesense_interface/msg/NavAll", dom10, dom100, "best_effort", 5))
+        lines.append(entry(f"/{n}/rl_manager/status", "robot_interfaces/msg/RlManagerStatus", dom10, dom100, "best_effort", 5))
+        lines.append(entry(f"/{n}/router/active_intent", "robot_interfaces/msg/RobotIntent", dom10, dom100, "best_effort", 5))
+        lines.append(entry(f"/{n}/odometry/odom", "nav_msgs/msg/Odometry", dom10, dom100, "best_effort", 5))
+        lines.append(entry(f"/{n}/recovery_state", "std_msgs/msg/UInt8MultiArray", dom10, dom100, "best_effort", 5))
+        lines.append(entry(f"/soccer/ground_truth_pose/{n}", "geometry_msgs/msg/Pose2D", dom10, dom100, "reliable", 10))
+        lines.append(entry(f"/soccer/ground_truth_ball/{n}", "geometry_msgs/msg/Point", dom10, dom100, "reliable", 10))
+    # GC 可选回读（域 100 -> 10），供 match manager 面板/判罚门控。
+    lines.append(entry("/soccer/game_controller", "game_controller_interface/msg/GameControlData", dom100, dom10, "reliable", 10))
+    path.write_text("".join(lines))
+
+
+def render_brain_profile(path: Path, match_ip: str) -> None:
+    src = ROOT / "configs/brain/sim_profile.yaml"
+    cfg = yaml.safe_load(src.read_text()) or {}
+    params = cfg.setdefault("brain_node", {}).setdefault("ros__parameters", {})
+    params["game_control_ip"] = match_ip
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False))
+
+
+def render_sim_params(path: Path, cameras: str | None) -> None:
+    cfg = yaml.safe_load((ROOT / "configs/sim/sim.yaml").read_text()) or {}
+    params = cfg.setdefault("/robot/sim_z01_std_robocup", {}).setdefault("ros__parameters", {})
+    periods = [0] * 6
+    if cameras:
+        for name in cameras.replace(",", " ").split():
+            m = re.fullmatch(r"robot_0([1-6])", name)
+            if not m:
+                die(f"--cameras 只接受 robot_01..robot_06: {name}")
+            periods[int(m.group(1)) - 1] = 33333
+    params["camera_period_us_list"] = periods
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False))
+
+
+# --------------------------------------------------------------------- process
+def shell_env(xml: Path, domain: int, run_dir: Path) -> dict:
+    env = os.environ.copy()
+    env["ROS_DOMAIN_ID"] = str(domain)
+    env["RMW_IMPLEMENTATION"] = "rmw_cyclonedds_cpp"
+    env["CYCLONEDDS_URI"] = f"file://{xml}"
+    env.pop("ROS_LOCALHOST_ONLY", None)
+    env["ROS_HOME"] = str(run_dir / "ros_home")
+    env["ROS_LOG_DIR"] = str(run_dir / "ros_log")
+    env["TMPDIR"] = str(run_dir / "tmp")
+    return env
+
+
+def spawn(pids: dict, name: str, cmd: list[str], log: Path, env: dict) -> int:
+    old = pids.get(name)
+    # 用进程组判活（不是只看 leader pid）：leader 退出但子进程还在时也要跳过，
+    # 避免重复拉起。
+    if old and old.get("pid") and group_alive(old):
+        info(f"skip {name}: already running pid={old['pid']}")
+        return int(old["pid"])
+    log.parent.mkdir(parents=True, exist_ok=True)
+    info(f"start {name}: {shlex.join(cmd)}")
+    f = log.open("ab")
+    proc = subprocess.Popen(
+        cmd, stdout=f, stderr=subprocess.STDOUT, env=env,
+        start_new_session=True, close_fds=True)
+    # pgid 用于 down：leader 退出后只要组里还有子进程也能整组清掉。
+    # start_new_session=True 保证 pgid == pid。
+    pids[name] = {"pid": proc.pid, "pgid": proc.pid, "cmd": cmd, "log": str(log)}
+    return proc.pid
+
+
+def source_command(setup_files: list[str], command: str) -> list[str]:
+    sources = "; ".join(f"source {shlex.quote(p)}" for p in setup_files)
+    return ["bash", "-c", f"set +u; {sources}; exec {command}"]
+
+
+def save_state(run_dir: Path, pids: dict, host: str, robots: list[dict],
+               profile: str | None = None) -> None:
+    state = {
+        "run_id": run_dir.name,
+        "host": host,
+        "profile": profile,
+        "robots": [r["name"] for r in robots],
+        "pids": pids,
+    }
+    (run_dir / "state.json").write_text(json.dumps(state, indent=2, ensure_ascii=False))
+    (RUNTIME / "active.json").write_text(json.dumps({"run_id": run_dir.name}, indent=2))
+    info(f"state: {run_dir / 'state.json'}")
+
+
+def group_alive(rec: dict) -> bool:
+    """进程组是否仍存活。
+
+    用 spawn 时保存的 pgid（start_new_session=True，pgid == pid）。旧版本 state
+    没有 pgid，同样可以把记录的 pid 当 pgid——leader 退出后子进程仍留在组里，
+    只看 pid 会漏掉这些残留进程。
+    """
+    pgid = rec.get("pgid") or rec.get("pid")
+    if not pgid:
+        return False
+    try:
+        os.killpg(int(pgid), 0)
+        return True
+    except OSError:
+        return False
+
+
+def live_count(state: dict) -> int:
+    return sum(1 for rec in (state.get("pids") or {}).values() if group_alive(rec))
+
+
+def iter_runs():
+    """遍历 runtime/<run_id>/state.json，按 run_id 从新到旧。"""
+    if not RUNTIME.is_dir():
+        return
+    for state_file in sorted(RUNTIME.glob("*/state.json"), reverse=True):
+        try:
+            state = json.loads(state_file.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(state, dict):
+            yield state_file.parent, state
+
+
+def live_runs() -> list[tuple[Path, dict]]:
+    return [(d, s) for d, s in iter_runs() if live_count(s) > 0]
+
+
+def load_active() -> tuple[Path, dict]:
+    """返回当前活跃 run。
+
+    优先 active.json；它指向的 run 已无存活进程时退回扫描 runtime/：
+    有唯一存活 run 就用它，多个则要求显式 down / --run-id。
+    """
+    active = RUNTIME / "active.json"
+    if active.is_file():
+        try:
+            run_id = json.loads(active.read_text()).get("run_id")
+        except (OSError, ValueError):
+            run_id = None
+        if run_id:
+            run_dir = RUNTIME / str(run_id)
+            state_file = run_dir / "state.json"
+            if state_file.is_file():
+                try:
+                    state = json.loads(state_file.read_text())
+                except (OSError, ValueError):
+                    state = None
+                if isinstance(state, dict) and live_count(state) > 0:
+                    return run_dir, state
+
+    live = live_runs()
+    if len(live) == 1:
+        return live[0]
+    if len(live) > 1:
+        ids = ", ".join(d.name for d, _ in live)
+        die(f"检测到多个运行中的 run（{ids}）；请先 ./robocup_sim down，或用 --run-id 指定")
+    die("没有运行记录（runtime/active.json 不存在，也没有存活进程）")
+
+
+# --------------------------------------------------------------------- roles
+def role_sim(args, run_dir, pids, xml, host, robots, inv) -> None:
+    env = shell_env(xml, int((inv.get("domains") or {}).get("internal", 10)), run_dir)
+    new_setup = str(ROOT / "install/setup.bash")
+    sim_params = run_dir / "sim/sim.yaml"
+    render_sim_params(sim_params, args.cameras)
+    headless = "true" if args.headless else "false"
+    cmd = (f"ros2 launch robocup_sim_bringup sim.launch.py "
+           f"headless:={headless} sim_params_file:={shlex.quote(str(sim_params))} "
+           f"robot_active_mask:={shlex.quote(mask_of(robots))}")
+    spawn(pids, "sim", source_command([ROS_SETUP, new_setup], cmd),
+          run_dir / "logs/sim.log", env)
+    names = " ".join(r["name"] for r in robots)
+    cmd = (f"ros2 launch robocup_sim_bringup relay.launch.py "
+           f"robots:={shlex.quote(names)}")
+    spawn(pids, "relay", source_command([ROS_SETUP, new_setup], cmd),
+          run_dir / "logs/relay.log", env)
+
+
+def role_control(args, run_dir, pids, xml, host, robots, inv) -> None:
+    host_cfg = (inv.get("hosts") or {}).get(host, {})
+    if args.role == "all":
+        assigned = list(robots)   # 单机联调：忽略 control_host 分配
+    else:
+        assigned = [r for r in robots if r.get("control_host", host) == host]
+    if not assigned:
+        info(f"host {host} 没有分配 control 机器人（跳过）")
+        return
+    zl_root = external_path("ZL_ROOT", host_cfg.get("zl_root"), DEFAULT_ZL_ROOT)
+    zl_setup = zl_root / "install/setup.bash"
+    if not zl_setup.is_file():
+        die(f"zl_robot 未构建: {zl_setup}")
+    env = shell_env(xml, int((inv.get("domains") or {}).get("internal", 10)), run_dir)
+    # 六机同机时限制每台 RL/控制进程的数学库线程，避免 8 核被 6 套推理打满。
+    for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS"):
+        env[key] = "1"
+    names = " ".join(r["name"] for r in assigned)
+    # 默认 RL 模型与 nav_mode 由 zl_robot 的 launch 自行决定；本仓库只传名单与配置根目录。
+    cmd = (f"ros2 launch robot_bringup zl_robot_multi.launch.py "
+           f"robots:={shlex.quote(names)} "
+           f"config_root:={shlex.quote(str(zl_root / 'config'))}")
+    spawn(pids, "control", source_command([ROS_SETUP, str(zl_setup)], cmd),
+          run_dir / "logs/control.log", env)
+
+
+def role_brain(args, run_dir, pids, xml, host, robots, inv, roster) -> None:
+    host_cfg = (inv.get("hosts") or {}).get(host, {})
+    if args.role == "all":
+        assigned = list(robots)   # 单机联调：忽略 brain_host 分配
+    else:
+        assigned = [r for r in robots if r.get("brain_host", host) == host]
+    if not assigned:
+        info(f"host {host} 没有分配 brain 机器人（跳过）")
+        return
+    brain_ws = external_path("BRAIN_WS", host_cfg.get("brain_ws"), DEFAULT_BRAIN_WS)
+    brain_setup = brain_ws / "install/setup.bash"
+    if not brain_setup.is_file():
+        die(f"brain 工作区未构建: {brain_setup}")
+    match_ip = host_cfg.get("address", "127.0.0.1")
+    for name, cfg in (inv.get("hosts") or {}).items():
+        if "match" in (cfg.get("roles") or []):
+            match_ip = cfg.get("address", match_ip)
+            break
+    profile = run_dir / "brain/sim_profile.yaml"
+    render_brain_profile(profile, str(match_ip))
+    env = shell_env(xml, int((inv.get("domains") or {}).get("external", 100)), run_dir)
+    # brain 每进程默认 ~20 线程；六机同机时限制到单线程数学库。
+    for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS"):
+        env[key] = "1"
+    team_ids = active_team_ids(roster, robots)
+    for r in assigned:
+        team_id = robot_team_id(team_ids, r)
+        cmd = (f"ros2 launch brain launch.py sim:=true "
+               f"robot_name:={r['name']} team_id:={team_id} "
+               f"player_id:={int(r.get('player_id', 1))} role:={r.get('role', 'striker')} "
+               f"sim_profile:={shlex.quote(str(profile))}")
+        spawn(pids, f"brain:{r['name']}", source_command([ROS_SETUP, str(brain_setup)], cmd),
+              run_dir / f"logs/brain_{r['name']}.log", env)
+
+
+def role_boundary(args, run_dir, pids, xml, host, robots, inv) -> None:
+    new_setup = str(ROOT / "install/setup.bash")
+    bridge_yaml = run_dir / "bridge/domain_bridge.yaml"
+    render_bridge(bridge_yaml, robots, inv)
+    # domain_bridge 同时需要两个域；环境用同一份 cluster XML。
+    env = shell_env(xml, int((inv.get("domains") or {}).get("internal", 10)), run_dir)
+    cmd = f"ros2 run domain_bridge domain_bridge {shlex.quote(str(bridge_yaml))}"
+    spawn(pids, "boundary", source_command([ROS_SETUP, new_setup], cmd),
+          run_dir / "logs/boundary.log", env)
+
+
+def role_match(args, run_dir, pids, xml, host, robots, inv, roster) -> None:
+    host_cfg = (inv.get("hosts") or {}).get(host, {})
+    new_setup = str(ROOT / "install/setup.bash")
+    # GC 在域 100（与 brain 同域）。
+    env = shell_env(xml, int((inv.get("domains") or {}).get("external", 100)), run_dir)
+    cmd = "ros2 launch game_controller launch.py"
+    spawn(pids, "game_controller", source_command([ROS_SETUP, new_setup], cmd),
+          run_dir / "logs/game_controller.log", env)
+    # match manager（域 10）与 referee_ui（无 ROS）在移植完成后启用。
+    team_ids = active_team_ids(roster, robots)
+    teams = {str(r.get("team", "A")).upper() for r in robots}
+    our = "A" if "A" in teams else "B"
+    opp = "B" if our == "A" else "A"
+    mm = ROOT / "referee_ui/app/match_manager.py"
+    if mm.is_file():
+        env10 = shell_env(xml, int((inv.get("domains") or {}).get("internal", 10)), run_dir)
+        names = " ".join(r["name"] for r in robots)
+        cmd = (f"python3 {shlex.quote(str(mm))} --robots {names} "
+               f"--our-side {our.lower()} --referee-url http://127.0.0.1:8090")
+        spawn(pids, "match_manager", source_command([ROS_SETUP, new_setup], cmd),
+              run_dir / "logs/match_manager.log", env10)
+    ui = ROOT / "referee_ui/app/gc_ui.py"
+    if ui.is_file():
+        match_ip = host_cfg.get("address", "127.0.0.1")
+        match_cfg = roster.get("match") or {}
+        per_team = int(match_cfg.get("players_per_team", 3))
+        cmd = (f"python3 {shlex.quote(str(ui))} --target {match_ip} "
+               f"--team-id {team_ids[our]} --opponent-team-id {team_ids[opp]} "
+               f"--players-per-team {per_team}")
+        spawn(pids, "referee_ui", ["bash", "-c", f"exec {cmd}"],
+              run_dir / "logs/referee_ui.log", os.environ.copy())
+
+
+def cmd_up(args) -> int:
+    inv = load_yaml(Path(args.inventory))
+    roster = load_yaml(Path(args.roster))
+    info(f"config: roster={args.roster} inventory={args.inventory}")
+    host = choose_host(inv, args.host)
+    robots = selected_robots(roster, args.robots)
+    robot_names = [r["name"] for r in robots]
+
+    # 单实例约束：本机同一时刻只允许一个存活 run。
+    # - 已有 1 个存活 run：默认复用它（重复 up 变成幂等，已运行的角色由 spawn
+    #   跳过）；--run-id 只能指向这个 run，否则拒绝，避免出现第二个仿真进程。
+    # - 已有多个（旧版本遗留）：要求先 down，不自动选择。
+    live = live_runs()
+    if len(live) > 1:
+        ids = ", ".join(f"{d.name}(alive={live_count(s)})" for d, s in live)
+        die(f"检测到多个运行中的 run：{ids}；请先 ./robocup_sim down 全部停止")
+    if live:
+        live_dir, live_state = live[0]
+        if args.run_id and args.run_id != live_dir.name:
+            die(f"已有运行中的 run {live_dir.name}；本机只允许一个 run，"
+                f"请先 ./robocup_sim down 或省略 --run-id 复用它")
+        if live_state.get("host") and live_state["host"] != host:
+            die(f"运行中的 run {live_dir.name} 属于 host={live_state['host']}，"
+                f"本次 host={host}；请先 ./robocup_sim down")
+        if live_state.get("profile") and live_state["profile"] != args.profile:
+            die(f"运行中的 run {live_dir.name} profile={live_state['profile']}，"
+                f"本次 profile={args.profile}；请先 ./robocup_sim down")
+        run_id = live_dir.name
+        run_dir = live_dir
+        info(f"复用运行中的 run {run_id}（alive={live_count(live_state)}）；"
+             f"重复 up 不会新建进程；如需全新运行请先 ./robocup_sim down")
+        if live_state.get("robots") and live_state["robots"] != robot_names:
+            die(f"运行中的 run {live_dir.name} robots={live_state['robots']}，"
+                f"本次 robots={robot_names}；不同名单请先 ./robocup_sim down")
+    else:
+        run_id = args.run_id or time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
+        run_dir = RUNTIME / run_id
+
+    for sub in ("logs", "dds", "bridge", "brain", "sim", "ros_home", "ros_log", "tmp"):
+        (run_dir / sub).mkdir(parents=True, exist_ok=True)
+    xml = run_dir / "dds/dds.xml"
+    render_dds(xml, host, inv, args.profile)
+    info(f"host={host} profile={args.profile} robots={robot_names}")
+    info(f"dds={xml}")
+
+    # 已有 state 时只补缺失/已退出的角色；存活的由 spawn 跳过。
+    pids: dict = {}
+    existing = run_dir / "state.json"
+    if existing.is_file():
+        pids = json.loads(existing.read_text()).get("pids") or {}
+        info(f"run {run_id} 已有 {len(pids)} 个进程组记录（存活的会跳过）")
+    pids_before = set(pids)
+    role = args.role
+    if role in ("all", "control"):
+        role_control(args, run_dir, pids, xml, host, robots, inv)
+    if role in ("all", "sim"):
+        role_sim(args, run_dir, pids, xml, host, robots, inv)
+    if role in ("all", "boundary") or (role == "sim" and not args.no_boundary):
+        role_boundary(args, run_dir, pids, xml, host, robots, inv)
+    if role in ("all", "match") or (role == "sim" and not args.no_match):
+        role_match(args, run_dir, pids, xml, host, robots, inv, roster)
+    if role in ("all", "brain"):
+        role_brain(args, run_dir, pids, xml, host, robots, inv, roster)
+    new_count = sum(1 for name in pids if name not in pids_before)
+    save_state(run_dir, pids, host, robots, args.profile)
+    info(f"{len(pids)} process groups recorded ({new_count} newly started); "
+         f"logs under {run_dir / 'logs'}")
+    return 0
+
+
+def cmd_standup(args) -> int:
+    run_dir, state = load_active()
+    robots = state.get("robots") or []
+    if args.robots:
+        wanted = set(args.robots.replace(",", " ").split())
+        robots = [r for r in robots if r in wanted]
+    if not robots:
+        die("没有可立起的机器人")
+    xml = run_dir / "dds/dds.xml"
+    env = shell_env(xml, 10, run_dir)
+    new_setup = str(ROOT / "install/setup.bash")
+    helper = ROOT / "tools/standup.py"
+    cmd = (f"python3 {shlex.quote(str(helper))} --robots {' '.join(robots)} "
+           f"--alt-threshold {args.alt_threshold} --timeout {args.timeout}")
+    if args.dry_run:
+        print(f"[dry-run] {cmd}")
+        return 0
+    info(f"standup: {' '.join(robots)}")
+    proc = subprocess.run(
+        source_command([ROS_SETUP, new_setup], cmd), env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        timeout=args.timeout + 15)
+    print(proc.stdout or "", end="")
+    if proc.returncode != 0:
+        print(f"[WARN] standup 返回 {proc.returncode}；可重复执行或查看 state/nav_all",
+              file=sys.stderr)
+    return proc.returncode
+
+
+def cmd_down(args) -> int:
+    # 默认停止所有存活 run（包括旧版本遗留的重复 run：旧 active.json 只指向
+    # 最后一个，之前的进程会泄漏）。--run-id 只停指定 run。
+    if args.run_id:
+        run_dir = RUNTIME / args.run_id
+        state_file = run_dir / "state.json"
+        if not state_file.is_file():
+            die(f"没有该 run 的记录: {state_file}")
+        targets = [(run_dir, json.loads(state_file.read_text()))]
+    else:
+        targets = [(d, s) for d, s in iter_runs() if live_count(s) > 0]
+
+    if not targets:
+        info("没有运行中的 run")
+        (RUNTIME / "active.json").unlink(missing_ok=True)
+        return 0
+
+    stopped = 0
+    sent: list[int] = []
+    for run_dir, state in targets:
+        for name, rec in (state.get("pids") or {}).items():
+            pgid = rec.get("pgid") or rec.get("pid")
+            if not pgid or not group_alive(rec):
+                continue
+            try:
+                os.killpg(int(pgid), signal.SIGINT)
+                info(f"stop {run_dir.name}/{name} (pgid {pgid})")
+                stopped += 1
+                sent.append(int(pgid))
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    time.sleep(3)
+
+    # 只对确实收到过 SIGINT 的组补 SIGKILL：已退出的记录不再按旧 pgid 发信号，
+    # 避免 PID 复用误伤无关进程。
+    for pgid in sent:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    active = RUNTIME / "active.json"
+    if args.run_id:
+        try:
+            active_run = json.loads(active.read_text()).get("run_id")
+        except (OSError, ValueError):
+            active_run = None
+        if active_run == args.run_id:
+            active.unlink(missing_ok=True)
+    else:
+        active.unlink(missing_ok=True)
+
+    info(f"down complete（停止 {len(targets)} 个 run / {stopped} 个进程组）")
+    return 0
+
+
+def cmd_status(args) -> int:
+    runs = list(iter_runs())
+    live = [(d, s) for d, s in runs if live_count(s) > 0]
+    if not live:
+        print("no active run")
+        if runs:
+            latest_dir, _ = runs[0]
+            print(f"last run: {latest_dir.name}（无存活进程）")
+        return 0
+    for run_dir, state in live:
+        print(f"run_id={run_dir.name} host={state.get('host')} "
+              f"profile={state.get('profile')} robots={state.get('robots')} "
+              f"alive={live_count(state)}/{len(state.get('pids') or {})}")
+        for name, rec in (state.get("pids") or {}).items():
+            ok = group_alive(rec)
+            print(f"  {'RUN ' if ok else 'DEAD'} {name:24s} pid={rec.get('pid')} "
+                  f"log={rec.get('log')}")
+    if len(live) > 1:
+        print("[WARN] 检测到多个运行中的 run；建议 ./robocup_sim down 全部停止")
+    return 0
+
+
+def cmd_doctor(args) -> int:
+    inv = load_yaml(Path(args.inventory))
+    roster = load_yaml(Path(args.roster))
+    print(f"config: roster={args.roster} inventory={args.inventory}")
+    errors = 0
+
+    def check(ok: bool, msg: str) -> None:
+        nonlocal errors
+        print(f"  [{'OK ' if ok else 'ERR'}] {msg}")
+        if not ok:
+            errors += 1
+
+    check(Path(ROS_SETUP).is_file(), ROS_SETUP)
+    check(bool(selected_robots(roster, None)), "roster enabled robots")
+    for host, cfg in (inv.get("hosts") or {}).items():
+        if "control" in (cfg.get("roles") or []):
+            zl_root = external_path("ZL_ROOT", cfg.get("zl_root"), DEFAULT_ZL_ROOT)
+            check((zl_root / "install/setup.bash").is_file(), f"{host} zl_robot install")
+            # robocup_sim 用多机控制栈；这是 zl_robot 侧新增的 launch 文件，
+            # 干净 checkout 不一定有，必须在每台 control 机上存在。
+            check((zl_root / "install/robot_bringup/share/robot_bringup/launch/"
+                   "zl_robot_multi.launch.py").is_file(),
+                  f"{host} zl_robot_multi.launch.py")
+        if "brain" in (cfg.get("roles") or []):
+            brain_ws = external_path("BRAIN_WS", cfg.get("brain_ws"), DEFAULT_BRAIN_WS)
+            check((brain_ws / "install/setup.bash").is_file(),
+                  f"{host} brain install")
+    check((ROOT / "install/setup.bash").is_file(), "robocup_sim install")
+    check((ROOT / "install/robocup_sim_bridge").exists(), "sim_relay built")
+    check((ROOT / "install/mj_sim/share/mj_sim/description/Z01_std_robocup/xml/"
+           "Z01_std_robocup.xml").is_file(), "six-robot MuJoCo XML")
+    check(bool(load_yaml(ROOT / "configs/brain/sim_profile.yaml")), "brain sim profile")
+    print(f"[{'OK' if errors == 0 else 'FAIL'}] doctor: {errors} error(s)")
+    return 0 if errors == 0 else 1
+
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="robocup_sim")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def common(p):
+        p.add_argument("--roster", default=default_config("roster", DEFAULT_ROSTER))
+        p.add_argument("--inventory", default=default_config("inventory", DEFAULT_INVENTORY))
+        p.add_argument("--host", default=None, help="inventory 主机名；默认按本机 IP 匹配")
+        p.add_argument("--robots", default=None, help="覆盖 enabled 名单，如 'robot_01 robot_02'")
+
+    up = sub.add_parser("up", help="启动本机角色")
+    common(up)
+    up.add_argument("--role", default="all",
+                    choices=["sim", "control", "brain", "boundary", "match", "all"])
+    up.add_argument("--profile", default=None, choices=["local", "unicast"],
+                    help="local=lo 单机；unicast=按 inventory 渲染跨机 Peers")
+    up.add_argument("--headless", action="store_true", help="关闭 MuJoCo 窗口")
+    up.add_argument("--cameras", default=None, help="按台开启相机，如 robot_01,robot_02")
+    up.add_argument("--no-boundary", action="store_true",
+                    help="--role sim 时不顺带启动 domain_bridge")
+    up.add_argument("--no-match", action="store_true",
+                    help="--role sim 时不顺带启动 GC/裁判/match manager")
+    up.add_argument("--run-id", default=None,
+                    help="追加到指定 run；本机已有存活 run 时只允许指向它")
+    up.set_defaults(func=cmd_up)
+
+    standup = sub.add_parser("standup", help="ready→reload→walk，立起当前 run 的机器人")
+    standup.add_argument("--robots", default=None)
+    standup.add_argument("--alt-threshold", type=float, default=0.5)
+    standup.add_argument("--timeout", type=float, default=60.0)
+    standup.add_argument("--dry-run", action="store_true")
+    standup.set_defaults(func=cmd_standup)
+
+    down = sub.add_parser("down", help="停止所有运行中的 run（--run-id 只停指定 run）")
+    down.add_argument("--run-id", default=None)
+    down.set_defaults(func=cmd_down)
+
+    st = sub.add_parser("status", help="查看运行中的 run（全部）")
+    st.set_defaults(func=cmd_status)
+
+    doc = sub.add_parser("doctor", help="环境自检")
+    common(doc)
+    doc.set_defaults(func=cmd_doctor)
+    return ap
+
+
+def main() -> int:
+    ap = build_parser()
+    args = ap.parse_args()
+    if args.cmd == "up" and args.profile is None:
+        inv = load_yaml(Path(args.inventory))
+        args.profile = (inv.get("dds") or {}).get("mode", "local")
+        if args.profile not in ("local", "unicast"):
+            args.profile = "local"
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

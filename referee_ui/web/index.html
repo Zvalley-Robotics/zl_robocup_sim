@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>裁判机 · 独立面板</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #10151d; --card: #171c24; --line: #232c38;
+    --text: #e8edf4; --dim: #8fa0b5; --cyan: #38c7d4; --magenta: #e05aa8;
+    --green: #39c46f; --red: #e05c5c; --orange: #e0a13c; --blue: #4f8fe0;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text); overflow: hidden;
+    display: flex; flex-direction: column;
+    font: 13px/1.45 "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex: none;
+    padding: 7px 14px; background: #141922; border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+  .chips { display: flex; gap: 10px; margin-left: auto; flex-wrap: wrap; }
+  .chip { display: flex; align-items: center; gap: 5px; color: var(--dim); font-size: 12px; white-space: nowrap; }
+  .chip i {
+    width: 9px; height: 9px; border-radius: 50%; background: #3a4553;
+    display: inline-block; transition: .25s;
+  }
+  .chip.on { color: var(--text); }
+  .chip.on i { background: var(--green); box-shadow: 0 0 8px #39c46f88; }
+  .chip.off i { background: var(--red); }
+  .chip b { color: var(--text); font-variant-numeric: tabular-nums; }
+  /* 整页一屏：顶部信息条 + 左侧场地 + 右侧控制列 */
+  main {
+    flex: 1; min-height: 0; padding: 10px; display: grid; gap: 10px;
+    grid-template-columns: minmax(360px, 1.45fr) minmax(380px, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .topbar {
+    grid-column: 1 / -1; min-height: 0; display: grid; gap: 10px;
+    grid-template-columns: minmax(0, 1.25fr) minmax(0, .85fr) minmax(0, 1fr);
+  }
+  /* 顶栏三卡等高，内容垂直居中，避免下方大片悬空 */
+  .topbar .card { justify-content: center; }
+  .side { min-height: 0; display: grid; gap: 10px; grid-template-rows: auto auto minmax(0, 1fr); }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 9px 12px; min-height: 0; display: flex; flex-direction: column; overflow: auto;
+  }
+  .card h2 {
+    margin: 0 0 7px; font-size: 12px; font-weight: 600; color: var(--dim);
+    letter-spacing: .4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .row + .row { margin-top: 6px; }
+  .row label.lbl { color: var(--dim); font-size: 12px; }
+  button, select, input[type="number"] {
+    background: #1d2530; color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 4px 9px; font: inherit; font-size: 12.5px; cursor: pointer;
+  }
+  select { max-width: 200px; }
+  input[type="number"] { width: 80px; cursor: text; font-variant-numeric: tabular-nums; }
+  button:hover { border-color: #35455a; }
+  button:active { transform: translateY(1px); }
+  button.active { background: var(--cyan); border-color: var(--cyan); color: #06232a; font-weight: 600; }
+  button.primary { border-color: var(--cyan); color: var(--cyan); }
+  button.goal-our { border-color: var(--cyan); color: var(--cyan); font-weight: 600; padding: 6px 12px; }
+  button.goal-opp { border-color: var(--magenta); color: var(--magenta); font-weight: 600; padding: 6px 12px; }
+  button.warn { border-color: var(--orange); color: var(--orange); }
+  .states { display: flex; gap: 6px; flex-wrap: wrap; }
+  .states button { flex: 1 1 auto; padding: 6px 6px; letter-spacing: .4px; }
+  .score {
+    display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap;
+    font-size: 22px; font-variant-numeric: tabular-nums; margin: 5px 0 0;
+  }
+  .score .team { font-size: 11px; color: var(--dim); text-align: center; line-height: 1.15; }
+  .score b.our { color: var(--cyan); }
+  .score b.opp { color: var(--magenta); }
+  .mini { padding: 1px 7px; font-size: 11.5px; }
+  .hint { color: var(--dim); font-size: 11.5px; margin: 6px 0 0; }
+  .hint.err { color: var(--red); }
+  .hint.ok { color: var(--green); }
+  .hint:empty { display: none; }
+  .stage { color: var(--orange); font-size: 11.5px; margin: 6px 0 0; }
+  .stage:empty { display: none; }
+  /* 说明折叠：默认收起，展开后不影响主控区布局 */
+  details.tip { margin-top: 6px; font-size: 11.5px; color: var(--dim); }
+  details.tip summary { cursor: pointer; color: #71839a; outline: none; }
+  details.tip p { margin: 5px 0 0; }
+  .pen { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .pen + .pen { margin-top: 4px; }
+  .pen .lbl { color: var(--dim); font-size: 12px; min-width: 30px; }
+  .pen label { display: flex; align-items: center; gap: 3px; font-size: 12.5px; cursor: pointer; }
+  code { background: #1d2530; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+  .warnbox { color: var(--orange); }
+  .rdot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: var(--red); flex: none; }
+  .rdot.on { background: var(--green); box-shadow: 0 0 8px #39c46f88; }
+  /* 在线列表：多台并排 chip，详情（消息名/包数/地址）走 hover title */
+  #robot-rows {
+    flex: 1; min-height: 0; overflow: auto; display: grid; align-content: start;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px 8px;
+  }
+  .rchip {
+    display: flex; align-items: center; gap: 6px; padding: 3px 7px;
+    border: 1px solid var(--line); border-radius: 6px; font-size: 12px;
+    font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden;
+  }
+  .rchip.dim { color: var(--dim); opacity: .7; }
+  .rchip b { font-weight: 600; }
+  .rchip .age { color: var(--dim); font-size: 11.5px; margin-left: auto; }
+  /* 判罚一键网格：类型标签 + 我方/对手 两列 */
+  .fk-grid {
+    display: grid; grid-template-columns: 66px minmax(0, 1fr) minmax(0, 1fr);
+    gap: 5px; margin-top: 7px; align-items: center;
+  }
+  .fk-grid .fk-kind { color: var(--dim); font-size: 12px; text-align: right; padding-right: 2px; }
+  .fk-grid button { padding: 4px; font-size: 12px; }
+  .fk-grid button.our { border-color: #2c5d68; color: var(--cyan); }
+  .fk-grid button.opp { border-color: #63374f; color: var(--magenta); }
+  .fk-grid button.live { background: var(--cyan); border-color: var(--cyan); color: #06232a; font-weight: 600; }
+  .fk-grid button.opp.live { background: var(--magenta); border-color: var(--magenta); color: #2b0618; }
+  #sub-btns { flex: 1 1 auto; }
+  #sub-btns button { font-size: 12px; padding: 5px 4px; }
+  button:disabled { opacity: .38; cursor: not-allowed; }
+  button:disabled:hover { border-color: var(--line); }
+  /* 场地位置：画布撑满卡片剩余高度 */
+  .field-card { overflow: hidden; }
+  .field-wrap { position: relative; flex: 1; min-height: 0; }
+  #field-canvas { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 8px; background: #0b1016; }
+  .legend { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 8px; font-size: 11.5px; color: var(--dim); }
+  .legend span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+  .pos-summary { margin-left: auto; font-variant-numeric: tabular-nums; }
+  /* 全页说明弹层 */
+  .overlay { position: fixed; inset: 0; z-index: 50; display: none; padding: 24px; overflow: auto; background: #05080ccc; }
+  .overlay.show { display: block; }
+  .help-box { max-width: 780px; margin: 6vh auto; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+  .help-box h3 { margin: 0 0 10px; font-size: 14px; }
+  .help-box p { margin: 6px 0; color: var(--dim); font-size: 13px; }
+  /* 窄屏回退：恢复为单列可滚动，避免控件被裁 */
+  @media (max-width: 1080px) {
+    body { overflow: auto; height: auto; }
+    main { grid-template-columns: 1fr; grid-template-rows: none; }
+    .topbar { grid-template-columns: 1fr; }
+    .side { grid-template-rows: none; }
+    .field-card { min-height: 52vh; }
+    #robot-rows { overflow: visible; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>裁判机 · 独立面板</h1>
+  <span class="chip" id="chip-conn"><i></i>面板连接</span>
+  <button class="mini" id="help-btn" title="打开使用说明">说明</button>
+  <div class="chips">
+    <span class="chip" id="chip-enabled"><i></i>发送 <b id="v-enabled">--</b></span>
+    <span class="chip" id="chip-auto"><i></i>自动时间线 <b id="v-auto">--</b></span>
+    <span class="chip"><i class="on"></i>已发送 <b id="v-sent">0</b> 包</span>
+    <span class="chip" id="chip-robots"><i></i>机器人在线 <b id="v-robots">--</b></span>
+    <span class="chip" id="chip-poses"><i></i>位置 <b id="v-poses">--</b></span>
+    <span class="chip">UDP <b id="v-target">--</b></span>
+  </div>
+</header>
+
+<main>
+  <!-- 顶部信息条：比赛状态 / 时钟 / 比分 -->
+  <div class="topbar">
+    <section class="card">
+      <h2 title="手动指定即退出自动时间线">比赛状态</h2>
+      <div class="states" id="state-btns"></div>
+      <p class="stage" id="stage-info"></p>
+    </section>
+
+    <section class="card">
+      <h2>比赛时钟（秒）</h2>
+      <div class="row">
+        <input type="number" id="secs" min="0" max="65535" step="5">
+        <button id="secs-apply" class="primary">应用</button>
+      </div>
+      <div class="row">
+        <button class="mini" data-secs="600">600</button>
+        <button class="mini" data-secs="+60">+60</button>
+        <button class="mini" data-secs="-60">−60</button>
+        <button class="mini" data-secs="0">归零</button>
+      </div>
+      <details class="tip"><summary>说明</summary>
+        <p>仅 PLAYING 且启用发送时按真实时间递减；归零自动切 FINISHED 并停 auto。</p>
+      </details>
+    </section>
+
+    <section class="card">
+      <h2>比分 / 进球结算</h2>
+      <div class="row">
+        <button class="goal-our" id="goal-our">我方进球 +1</button>
+        <button class="goal-opp" id="goal-opp">对方进球 +1</button>
+        <button class="mini" id="scores-reset">比分清零</button>
+      </div>
+      <div class="score">
+        <div class="team">我方<br><b class="our" id="score-our">0</b></div>
+        <span>:</span>
+        <div class="team">对手<br><b class="opp" id="score-opp">0</b></div>
+        <button class="mini" data-score="our:-1">−</button>
+        <button class="mini" data-score="our:1">＋</button>
+        <button class="mini" data-score="opp:-1">−</button>
+        <button class="mini" data-score="opp:1">＋</button>
+      </div>
+      <p class="hint" id="op-msg"></p>
+      <details class="tip"><summary>说明</summary>
+        <p>进球 +1 自动交换开球权，并启动重开仪式 READY 10s → SET 5s → PLAYING。</p>
+      </details>
+    </section>
+  </div>
+
+  <!-- 实机场地位置（占据左侧主区） -->
+  <section class="card field-card">
+    <h2>场地位置（各 NX pose_reporter UDP 3940 · 10 Hz）</h2>
+    <div class="field-wrap"><canvas id="field-canvas"></canvas></div>
+    <div class="legend">
+      <span><i style="background:#38c7d4"></i>我方机器人</span>
+      <span><i style="background:#e05aa8"></i>对手机器人</span>
+      <span><i style="background:#e0cc4a"></i>球（某机信念）</span>
+      <span><i style="background:#63707f"></i>陈旧 / 离线</span>
+      <span><i style="background:#e05c5c"></i>红环 = 未定位 / 越界</span>
+      <span class="pos-summary" id="pose-summary">等待位置数据…</span>
+    </div>
+    <details class="tip"><summary>说明</summary>
+      <p>显示系 = 我方 Brain 场地系（场心原点，+x 指向我方进攻方向）。
+        对手（team ≠ 我方队号）上报已自动旋转 180°，两队因此分居两个半场；
+        实线箭头为最新位置，淡色拖尾为最近 3s 轨迹；半透明 = 位姿陈旧，
+        灰色 = 离线；红环 = x/y/θ 仍为初值（自定位未收敛）或越出场地。</p>
+    </details>
+  </section>
+
+  <!-- 右侧控制列：开球判罚 / 罚下 / 在线状态 -->
+  <div class="side">
+    <section class="card">
+      <h2>出界判罚（点一下设判罚，再手动推进）</h2>
+      <div class="row">
+        <label class="lbl">开球方</label>
+        <select id="kickoff"></select>
+      </div>
+      <div class="fk-grid" id="fk-grid"></div>
+      <div class="row">
+        <label class="lbl">子状态</label>
+        <div class="states" id="sub-btns"></div>
+      </div>
+      <div class="row">
+        <button id="fk-end" class="warn">结束判罚</button>
+        <button id="gr-start" class="mini">重开仪式</button>
+      </div>
+      <p class="hint" id="fk-msg"></p>
+      <details class="tip"><summary>说明 / 高级</summary>
+        <p>点两列判罚按钮只做两件事：设判罚类型 + 写发球方（同时作为开球权），子状态回到 STOP，
+          不启动任何自动计时。之后由裁判手动点 STOP → GET_READY → SET 推进，
+          到位后点「结束判罚」清空二级状态恢复比赛。</p>
+        <p>若外部判罚程序（match_official 等）正在跑自动时序，本页子状态按钮会置灰，
+          避免两边互相覆盖；进球重开仪式仍是自动 READY 10s → SET 5s → PLAYING。</p>
+        <div class="row">
+          <label class="lbl">二级状态</label>
+          <select id="secondary"></select>
+          <select id="sub" style="display:none"></select>
+        </div>
+        <p>二级状态 / 子状态下拉是直接改帧字段，与上方按钮等效，排障时用。</p>
+      </details>
+    </section>
+
+    <section class="card">
+      <h2>逐球员罚下（未用槽位填 SUBSTITUTE）</h2>
+      <div class="pen" id="pen-our"><span class="lbl">我方</span></div>
+      <div class="pen" id="pen-opp"><span class="lbl">对手</span></div>
+    </section>
+
+    <section class="card">
+      <h2>机器人在线（UDP 3939 · 1 Hz）</h2>
+      <div id="robot-rows"><p class="hint">等待快照…</p></div>
+    </section>
+  </div>
+</main>
+
+<div class="overlay" id="help">
+  <div class="help-box">
+    <h3>使用说明</h3>
+    <p>配合 <code>ros2 launch game_controller launch.py</code>（仿真：本机域 100；
+       实机：各机器人本机域 10，--target 指向机器人 IP）使用；
+       UDP 面板负责产生 HL v12 数据包，本页无任何 ROS 依赖。</p>
+    <p>实机在线状态：面板内嵌监听 UDP 3939 的 brain 保活心跳（RGrt 8B，1 Hz），
+       3s 无心跳判离线；各实机 brain 的 <code>game_control_ip</code> 需指向本机（裁判机），
+       深层机体状态请 SSH 登录机器人本体观测；
+       若改用独立监视 <code>referee_ui/scripts/start_robot_watch.sh</code>，本面板须加
+       <code>--no-robot-watch</code> 释放端口。</p>
+    <p>逐球员罚下：勾选 = PENALTY_MANUAL（40s），未用槽位自动填 SUBSTITUTE，列表全量替换下发。</p>
+    <p>自动时间线：INITIAL(5s) → READY(10s) → SET(5s) → PLAYING(60s) → FINISHED(3s) 循环。</p>
+    <p class="warnbox">⚠ 不能双源：若对侧仿真也发送 GC 数据，必须只保留一方发送（本面板可一键停发）。</p>
+    <div class="row"><button class="primary" id="help-close">关闭</button></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let S = null;              // 最近一次快照
+let lastOk = 0;            // 最近一次轮询成功时间
+let penBuilt = 0;          // 罚下复选已构建的 players_per_team
+
+const STATE_LABELS = {0: "INITIAL 备场", 1: "READY 入场", 2: "SET 待哨", 3: "PLAYING 比赛", 4: "FINISHED 结束"};
+const SEC2_LABELS = {
+  0: "NONE", 3: "TIMEOUT", 4: "DIRECT_FREEKICK", 5: "INDIRECT_FREEKICK",
+  6: "PENALTY_KICK", 7: "CORNER_KICK", 8: "GOAL_KICK", 9: "THROW_IN"
+};
+const SUB_LABELS = {0: "STOP", 1: "GET_READY", 2: "SET"};
+
+async function post(body, msgId) {
+  try {
+    const r = await fetch("/api/command", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body)
+    });
+    const j = await r.json();
+    if (!j.ok) setMsg("指令失败: " + (j.error || r.status), true, msgId);
+    else setMsg("已下发: " + JSON.stringify(body), false, msgId);
+  } catch (e) {
+    setMsg("请求失败: " + e, true, msgId);
+  }
+  poll();
+}
+
+function setMsg(text, isErr, msgId) {
+  const el = $(msgId || "op-msg");
+  el.textContent = text;
+  el.className = "hint" + (isErr ? " err" : " ok");
+}
+
+function buildStatic() {
+  // 状态按钮
+  const box = $("state-btns");
+  box.innerHTML = "";
+  Object.entries(STATE_LABELS).forEach(([v, label]) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.dataset.state = v;
+    b.onclick = () => post({cmd: "patch", patch: {state: Number(v)}});
+    box.appendChild(b);
+  });
+  // 二级状态下拉
+  const sec = $("secondary");
+  sec.innerHTML = "";
+  Object.entries(SEC2_LABELS).forEach(([v, label]) => {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = label;
+    sec.appendChild(o);
+  });
+  sec.onchange = () => post({cmd: "patch", patch: {secondary_state: Number(sec.value)}});
+  // 子状态下拉
+  const sub = $("sub");
+  sub.innerHTML = "";
+  Object.entries(SUB_LABELS).forEach(([v, label]) => {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = label;
+    sub.appendChild(o);
+  });
+  sub.onchange = () => post({cmd: "patch", patch: {secondary_sub: Number(sub.value)}});
+  // 一键判罚网格：每行一类判罚，左列我方发球、右列对手发球（点击即下发时序）
+  const FK_ROWS = [[7, "角球"], [9, "界外球"], [8, "球门球"],
+                   [4, "直接任意球"], [5, "间接任意球"], [6, "点球"]];
+  const fkGrid = $("fk-grid");
+  fkGrid.innerHTML = "";
+  FK_ROWS.forEach(([v, name]) => {
+    const kind = document.createElement("span");
+    kind.className = "fk-kind";
+    kind.textContent = name;
+    fkGrid.appendChild(kind);
+    [["our", "我方"], ["opp", "对手"]].forEach(([team, tname]) => {
+      const b = document.createElement("button");
+      b.className = team;
+      b.textContent = tname;
+      b.dataset.fk = v;
+      b.dataset.team = team;
+      b.title = name + " · " + tname + "发球";
+      b.onclick = async () => {
+        if (!S) { setMsg("面板快照未就绪，稍后再试", true, "fk-msg"); return; }
+        const teamId = team === "our" ? S.team_id : S.opponent_team_id;
+        await post({cmd: "patch", patch: {secondary_state: v, kick_off_team: teamId}}, "fk-msg");
+        if (S.state !== 3) {
+          setMsg("已设为 " + name + " · " + tname + "，但当前不是 PLAYING（" +
+                 (STATE_LABELS[S.state] || S.state) + "），机器人可能不响应", true, "fk-msg");
+        } else {
+          setMsg("已设为 " + name + " · " + tname +
+                 "发球（子状态 STOP），接着手动点 GET_READY / SET", false, "fk-msg");
+        }
+      };
+      fkGrid.appendChild(b);
+    });
+  });
+  // 子状态手动推进（不自动计时）
+  const subBox = $("sub-btns");
+  subBox.innerHTML = "";
+  [[0, "STOP"], [1, "GET_READY"], [2, "SET"]].forEach(([v, label]) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.dataset.sub = v;
+    b.onclick = () => post({cmd: "patch", patch: {secondary_sub: v}}, "fk-msg");
+    subBox.appendChild(b);
+  });
+  // 按钮绑定
+  $("secs-apply").onclick = () => post({cmd: "patch", patch: {secs_remaining: Number($("secs").value)}});
+  document.querySelectorAll("button[data-secs]").forEach((b) => {
+    b.onclick = () => {
+      const v = b.dataset.secs;
+      let n;
+      if (v === "+60") n = (S ? S.secs_remaining : 0) + 60;
+      else if (v === "-60") n = Math.max(0, (S ? S.secs_remaining : 0) - 60);
+      else n = Number(v);
+      post({cmd: "patch", patch: {secs_remaining: n}});
+    };
+  });
+  $("fk-end").onclick = () => post({cmd: "cancel_freekick"}, "fk-msg");
+  $("gr-start").onclick = () => post({cmd: "goal_restart"}, "fk-msg");
+  $("goal-our").onclick = () => post({cmd: "goal", side: "our"});
+  $("goal-opp").onclick = () => post({cmd: "goal", side: "opp"});
+  $("scores-reset").onclick = () => post({cmd: "reset_scores"});
+  document.querySelectorAll("button[data-score]").forEach((b) => {
+    b.onclick = () => {
+      const [side, dv] = b.dataset.score.split(":");
+      const cur = S ? (side === "our" ? S.our_score : S.opp_score) : 0;
+      const key = side === "our" ? "our_score" : "opp_score";
+      post({cmd: "patch", patch: {[key]: Math.max(0, cur + Number(dv))}});
+    };
+  });
+}
+
+function buildPenalties(n) {
+  ["our", "opp"].forEach((side) => {
+    const box = $("pen-" + side);
+    box.innerHTML = '<span class="lbl">' + (side === "our" ? "我方" : "对手") + "</span>";
+    for (let i = 1; i <= n; i++) {
+      const label = document.createElement("label");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.dataset.side = side;
+      cb.dataset.num = i;
+      cb.onchange = () => {
+        const side = cb.dataset.side;
+        const list = [];
+        box.querySelectorAll("input").forEach((x) => {
+          if (x.checked) list.push(Number(x.dataset.num));
+        });
+        const key = side === "our" ? "penalize_our_players" : "penalize_opp_players";
+        post({cmd: "patch", patch: {[key]: list}});
+      };
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(" " + i + " 号"));
+      box.appendChild(label);
+    }
+  });
+  penBuilt = n;
+}
+
+function render() {
+  if (!S) return;
+  // 连接与开关
+  $("chip-conn").className = "chip " + (Date.now() - lastOk < 2500 ? "on" : "off");
+  $("chip-enabled").className = "chip " + (S.enabled ? "on" : "off");
+  $("chip-auto").className = "chip " + (S.auto ? "on" : "off");
+  $("v-enabled").textContent = S.enabled ? "开" : "关";
+  $("v-auto").textContent = S.auto ? "开" : "关";
+  $("v-sent").textContent = S.sent_count;
+  $("v-target").textContent = S.target;
+
+  // 状态按钮高亮
+  document.querySelectorAll("#state-btns button").forEach((b) => {
+    b.classList.toggle("active", Number(b.dataset.state) === S.state);
+  });
+
+  // 时钟输入（聚焦时不打断输入）
+  if (document.activeElement !== $("secs")) $("secs").value = S.secs_remaining;
+
+  // 开球队伍（选项依赖队伍号，首次构建）
+  const ko = $("kickoff");
+  if (ko.options.length === 0) {
+    const mk = (v, t) => { const o = document.createElement("option"); o.value = v; o.textContent = t; ko.appendChild(o); };
+    mk(S.team_id, "我方 (" + S.team_id + ")");
+    mk(S.opponent_team_id, "对手 (" + S.opponent_team_id + ")");
+    mk(255, "DROPBALL 抢球 (255)");
+  }
+  ko.value = String(S.kick_off_team);
+  ko.onchange = () => post({cmd: "patch", patch: {kick_off_team: Number(ko.value)}});
+
+  // 二级状态与子状态
+  $("secondary").value = String(S.secondary_state);
+  const showSub = S.secondary_state >= 4;
+  $("sub").style.display = showSub ? "" : "none";
+  if (showSub) $("sub").value = String(S.secondary_sub);
+
+  // 时序进行提示
+  let stage = "";
+  if (S.freekick_stage !== null && S.freekick_stage !== undefined) {
+    stage = "任意球时序进行中：stage " + S.freekick_stage + "（" +
+      (SUB_LABELS[S.secondary_sub] || "?") + "）";
+    if (S.waiting_kicker) stage += "，等待发球方就位…";
+    else if (S.kicker_ready && S.freekick_stage < 2) stage += "，已收到就位信号";
+    stage += "，推进完成后清空";
+  } else if (S.goal_restart_stage !== null && S.goal_restart_stage !== undefined) {
+    stage = "进球重开仪式进行中：stage " + S.goal_restart_stage + "（READY→SET→PLAYING 自动推进）";
+  } else if (S.secondary_state >= 4) {
+    stage = "判罚中：" + (SEC2_LABELS[S.secondary_state] || "?") + " · " +
+      (S.kick_off_team === S.team_id ? "我方" : "对手") + "发球 · 子状态 " +
+      (SUB_LABELS[S.secondary_sub] || "?") + "（手动推进，点「结束判罚」恢复比赛）";
+  }
+  $("stage-info").textContent = stage;
+
+  // 判罚进行中：高亮当前判罚与子状态，并启用控件
+  const penLive = S.secondary_state >= 4;
+  const autoLive = S.freekick_stage !== null && S.freekick_stage !== undefined;
+  document.querySelectorAll("#fk-grid button").forEach((b) => {
+    const teamId = b.dataset.team === "our" ? S.team_id : S.opponent_team_id;
+    b.classList.toggle("live", penLive && Number(b.dataset.fk) === S.secondary_state
+                               && S.kick_off_team === teamId);
+  });
+  document.querySelectorAll("#sub-btns button").forEach((b) => {
+    b.classList.toggle("active", penLive && Number(b.dataset.sub) === S.secondary_sub);
+    b.disabled = !penLive || autoLive;      // 外部自动时序在跑时禁用手动推进
+  });
+  $("fk-end").disabled = !penLive;
+
+  // 比分
+  $("score-our").textContent = S.our_score;
+  $("score-opp").textContent = S.opp_score;
+
+  // 实机在线状态（robots = robot_watch.RobotWatch 快照；null = 监视未启用）
+  const rs = S.robots;
+  const rbox = $("robot-rows");
+  if (!rs) {
+    $("chip-robots").className = "chip";
+    $("v-robots").textContent = "off";
+    rbox.innerHTML = '<p class="hint">3939 监视未启用（端口被占或启动时加了 --no-robot-watch）。</p>';
+  } else if (rs.list.length === 0) {
+    $("chip-robots").className = "chip";
+    $("v-robots").textContent = "0/" + rs.total;
+    rbox.innerHTML = '<p class="hint">暂无 RGrt 心跳——检查各 brain 的 game_control_ip 是否指向本机。</p>';
+  } else {
+    $("chip-robots").className = "chip " + (rs.online === rs.total ? "on" : "off");
+    $("v-robots").textContent = rs.online + "/" + rs.total;
+    rbox.innerHTML = rs.list.map((r) => {
+      const age = r.online ? r.age_sec.toFixed(1) + "s" : "离线 " + r.age_sec.toFixed(0) + "s";
+      const tip = "team " + r.team + " · P" + r.player + " · " + r.message_name +
+        " · " + r.count + " 包 · " + r.addr;
+      return '<div class="rchip' + (r.online ? "" : " dim") + '" title="' + tip + '">' +
+        '<span class="rdot' + (r.online ? " on" : "") + '"></span>' +
+        "<b>" + r.team + "·P" + r.player + "</b>" +
+        '<span class="age">' + age + "</span></div>";
+    }).join("");
+  }
+
+  // 罚下
+  if (penBuilt !== S.players_per_team) buildPenalties(S.players_per_team);
+  ["our", "opp"].forEach((side) => {
+    const set = new Set(side === "our" ? S.penalize_our_players : S.penalize_opp_players);
+    document.querySelectorAll("#pen-" + side + " input").forEach((cb) => {
+      cb.checked = set.has(Number(cb.dataset.num));
+    });
+  });
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/api/snapshot", {cache: "no-store"});
+    S = await r.json();
+    lastOk = Date.now();
+    $("chip-conn").className = "chip on";
+    render();
+  } catch (e) {
+    $("chip-conn").className = "chip off";
+  }
+  setTimeout(poll, 500);
+}
+
+// =====================================================================
+// 场地位置：/api/poses（PoseWatch 快照，独立 5 Hz 轮询，不干扰裁判控件）
+// =====================================================================
+const FIELD_DEFAULT = [14.0, 8.5, 2.1, 2.6, 1.5, 3.0, 5.8, 1.0, 4.0];
+const TRAIL_MS = 3000;
+let P = null;                 // 最近一次 /api/poses
+const trails = new Map();     // "team-player" -> [{x,y,t}]，t = performance.now()
+
+function fieldDims() {
+  if (P && Array.isArray(P.field) && P.field.length >= 9) return P.field;
+  const row = P && (P.list || []).find((r) => Array.isArray(r.field) && r.field.length >= 9);
+  return row ? row.field : FIELD_DEFAULT;
+}
+
+function updateTrails(list, now) {
+  const seen = new Set();
+  list.forEach((r) => {
+    const key = r.team + "-" + r.player;
+    seen.add(key);
+    if (!r.online) return;                     // 离线不再延展，旧尾迹自然过期
+    const arr = trails.get(key) || [];
+    const last = arr[arr.length - 1];
+    if (!last || Math.hypot(r.x - last.x, r.y - last.y) > 0.02) {
+      arr.push({x: r.x, y: r.y, t: now});
+    }
+    while (arr.length && now - arr[0].t > TRAIL_MS) arr.shift();
+    trails.set(key, arr);
+  });
+  [...trails.keys()].forEach((k) => { if (!seen.has(k)) trails.delete(k); });
+}
+
+function drawPositions() {
+  const cv = $("field-canvas");
+  if (!cv) return;
+  const dpr = window.devicePixelRatio || 1;
+  // 画布尺寸完全由 flex 容器决定（CSS 绝对定位 inset:0），这里只读不写回
+  const cssW = cv.clientWidth || 640;
+  const cssH = cv.clientHeight || 320;
+  const pw = Math.round(cssW * dpr), ph = Math.round(cssH * dpr);
+  if (cv.width !== pw || cv.height !== ph) { cv.width = pw; cv.height = ph; }
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  const fd = fieldDims();
+  const L = fd[0], W = fd[1], penaltyDist = fd[2], goalW = fd[3], circleR = fd[4];
+  const paL = fd[5], paW = fd[6], gaL = fd[7], gaW = fd[8];
+  const pad = 22;
+  // 视野含场外 1.5 m 待命/入场区（与后端越界容差一致），避免边线外机器人被裁
+  const margin = 1.5;
+  const scale = Math.min((cssW - pad * 2) / (L + 2 * margin),
+                         (cssH - pad * 2) / (W + 2 * margin));
+  const cx = cssW / 2, cy = cssH / 2;
+  const SX = (x) => cx + x * scale;
+  const SY = (y) => cy - y * scale;
+  const rect = (x0, y0, x1, y1) =>
+    ctx.strokeRect(SX(x0), SY(y1), (x1 - x0) * scale, (y1 - y0) * scale);
+
+  // 底色 + 白线场地
+  ctx.fillStyle = "#122019";
+  ctx.fillRect(SX(-L / 2), SY(W / 2), L * scale, W * scale);
+  ctx.strokeStyle = "#dfe8f2";
+  ctx.lineWidth = 1.6;
+  rect(-L / 2, -W / 2, L / 2, W / 2);
+  ctx.beginPath();
+  ctx.moveTo(SX(0), SY(-W / 2)); ctx.lineTo(SX(0), SY(W / 2));
+  ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx, cy, circleR * scale, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx, cy, 2.2, 0, Math.PI * 2);
+  ctx.fillStyle = "#dfe8f2"; ctx.fill();
+  [-1, 1].forEach((s) => {
+    rect(s * L / 2, -paW / 2, s * (L / 2 - paL), paW / 2);           // 禁区
+    rect(s * L / 2, -gaW / 2, s * (L / 2 - gaL), gaW / 2);           // 球门区
+    ctx.beginPath();
+    ctx.arc(SX(s * (L / 2 - penaltyDist)), cy, 2.2, 0, Math.PI * 2); // 罚球点
+    ctx.fill();
+    ctx.strokeStyle = "#9fb0c4";
+    const gx = s > 0 ? SX(L / 2) : SX(-L / 2) - 0.7 * scale;
+    ctx.strokeRect(gx, SY(goalW / 2), 0.7 * scale, goalW * scale);    // 球门（场地外）
+    ctx.strokeStyle = "#dfe8f2";
+  });
+
+  if (!P || P.enabled === false) {
+    ctx.fillStyle = "#8fa0b5";
+    ctx.font = "13px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(P ? "位置监视未启用（--no-pose-watch 或 3940 被占）"
+                   : "位置监视未连接", cx, cy - 6);
+    return;
+  }
+
+  const list = P.list || [];
+  const now = performance.now();
+  updateTrails(list, now);
+
+  // 尾迹（按队伍颜色，只画仍在快照里的机器人）
+  list.forEach((r) => {
+    const arr = trails.get(r.team + "-" + r.player) || [];
+    if (arr.length < 2) return;
+    ctx.save();
+    ctx.strokeStyle = r.is_our === false ? "#e05aa8" : "#38c7d4";
+    ctx.globalAlpha = 0.32;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    arr.forEach((p, i) => {
+      const px = SX(p.x), py = SY(p.y);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    });
+    ctx.stroke();
+    ctx.restore();
+  });
+
+  // 球：取接收年龄最小的一台机器人的信念
+  const ballRow = list.filter((r) => r.ball)
+    .sort((a, b) => a.age_sec - b.age_sec)[0];
+  if (ballRow) {
+    const bx = SX(ballRow.ball.x), by = SY(ballRow.ball.y);
+    ctx.save();
+    ctx.globalAlpha = ballRow.ball.age_ms > 1000 ? 0.35 : 0.9;
+    ctx.beginPath();
+    ctx.arc(bx, by, Math.max(3.5, 0.11 * scale), 0, Math.PI * 2);
+    ctx.fillStyle = "#e0cc4a";
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // 机器人：箭头颜色 = 队伍（我方青 / 对手品红），异常用红环 + 红字
+  const labels = [];                       // 已占用的标签包围盒，用于简易避让
+  list.forEach((r) => {
+    const px = SX(r.x), py = SY(r.y);
+    const bad = r.unlocalized || !r.valid;
+    const off = !r.online;
+    const col = off ? "#63707f" : (r.is_our === false ? "#e05aa8" : "#38c7d4");
+
+    ctx.save();
+    ctx.globalAlpha = r.fresh ? 1 : 0.45;
+    ctx.translate(px, py);
+    ctx.rotate(-r.theta);                       // 屏幕 y 翻转，角度取负
+    ctx.beginPath();
+    ctx.moveTo(11, 0);
+    ctx.lineTo(-7, 7);
+    ctx.lineTo(-3, 0);
+    ctx.lineTo(-7, -7);
+    ctx.closePath();
+    ctx.fillStyle = col;
+    ctx.fill();
+    ctx.restore();
+
+    if (bad || !r.fresh) {
+      ctx.save();
+      ctx.strokeStyle = bad ? "#e05c5c" : "#63707f";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.arc(px, py, 13, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    let tag = "P" + r.player + (r.robot ? " " + r.robot : "");
+    if (r.unlocalized) tag += " 未定位";
+    else if (!r.valid) tag += " 越界";
+    if (off) tag += " 离线";
+    else if (!r.fresh) tag += " · " + r.age_sec.toFixed(1) + "s";
+    ctx.save();
+    ctx.font = "12px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillStyle = bad ? "#e05c5c" : col;
+    ctx.globalAlpha = r.fresh ? 1 : 0.7;
+    // 标签避让：优先箭头正上/正下，冲突时继续上下错位
+    const halfW = ctx.measureText(tag).width / 2 + 2;
+    let labelY = py + 24;
+    for (const cand of [py - 17, py + 24, py - 31, py + 38, py - 45]) {
+      if (cand - 11 < 2) continue;
+      const hit = labels.some((b) =>
+        px - halfW < b.x1 && px + halfW > b.x0 &&
+        cand - 11 < b.y1 && cand + 4 > b.y0);
+      if (!hit) { labelY = cand; break; }
+    }
+    labels.push({x0: px - halfW, x1: px + halfW, y0: labelY - 11, y1: labelY + 4});
+    ctx.fillText(tag, px, labelY);
+    ctx.restore();
+  });
+}
+
+function renderPoses() {
+  if (!P) {
+    $("chip-poses").className = "chip off";
+    $("v-poses").textContent = "--";
+    $("pose-summary").textContent = "位置监视未连接";
+  } else if (P.enabled === false) {
+    $("chip-poses").className = "chip";
+    $("v-poses").textContent = "off";
+    $("pose-summary").textContent = "位置监视未启用（--no-pose-watch 或 3940 被占）";
+  } else {
+    $("chip-poses").className = "chip " + (P.fresh > 0 ? "on" : "off");
+    $("v-poses").textContent = P.fresh + "/" + P.total;
+    const gaps = (P.list || []).reduce((s, r) => s + (r.gaps || 0), 0);
+    const nOur = (P.list || []).filter((r) => r.is_our !== false).length;
+    const nOpp = (P.list || []).length - nOur;
+    $("pose-summary").textContent =
+      "我方 " + nOur + " · 对手 " + nOpp + " · 新鲜 " + P.fresh + "/" + P.total +
+      " · 丢包 " + gaps + " · " + P.listening;
+  }
+  drawPositions();
+}
+
+async function pollPoses() {
+  try {
+    const r = await fetch("/api/poses", {cache: "no-store"});
+    P = await r.json();
+  } catch (e) {
+    P = null;
+  }
+  renderPoses();
+  setTimeout(pollPoses, 200);
+}
+
+window.addEventListener("resize", () => drawPositions());
+// 容器高度随窗口/列宽变化（而非仅窗口 resize），用 ResizeObserver 跟随重绘
+if (window.ResizeObserver) {
+  const wrap = document.querySelector(".field-wrap");
+  if (wrap) new ResizeObserver(() => drawPositions()).observe(wrap);
+}
+
+// 全页说明弹层
+$("help-btn").onclick = () => $("help").classList.add("show");
+$("help-close").onclick = () => $("help").classList.remove("show");
+$("help").onclick = (e) => { if (e.target.id === "help") $("help").classList.remove("show"); };
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") $("help").classList.remove("show");
+});
+
+buildStatic();
+poll();
+pollPoses();
+</script>
+</body>
+</html>
