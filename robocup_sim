@@ -483,9 +483,14 @@ def role_brain(args, run_dir, pids, xml, host, robots, inv, roster) -> None:
     team_ids = active_team_ids(roster, robots)
     for r in assigned:
         team_id = robot_team_id(team_ids, r)
+        # 显式固定多机仿真的里程计入口为 legacy：AutoOdom 旁路仅支持单机，
+        # 且其全局 /autoodom/selected 不在本仓 bridge 白名单内；仿真使用 zl 原生
+        # 每机 /{name}/odometry/odom（legacy_world_position 约定）。
+        # 不依赖 brain launch.py 的默认值，避免上游改动让仿真 brain 启动即失败。
         cmd = (f"ros2 launch brain launch.py sim:=true "
                f"robot_name:={r['name']} team_id:={team_id} "
                f"player_id:={int(r.get('player_id', 1))} role:={r.get('role', 'striker')} "
+               f"odom_source:=legacy "
                f"sim_profile:={shlex.quote(str(profile))}")
         spawn(pids, f"brain:{r['name']}", source_command([ROS_SETUP, str(brain_setup)], cmd),
               run_dir / f"logs/brain_{r['name']}.log", env)

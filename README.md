@@ -319,14 +319,16 @@ python3 referee_ui/app/gc_ui.py --target 127.0.0.1 \
 ### `up --role brain`
 
 ```bash
-export BRAIN_WS="${BRAIN_WS:-$HOME/robocup_demo}"   # 或从 inventory.yaml 读取
+export BRAIN_WS="${BRAIN_WS:-$HOME/robocup_brain_demo}"   # 或从 inventory.yaml 读取
 source "$BRAIN_WS/install/setup.bash"
 export ROS_DOMAIN_ID=100
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
        MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 # 每台机器人一条；team_id/player_id/role 来自 roster.yaml
+# 多机仿真固定 legacy：AutoOdom 旁路仅支持单机，且其话题不在 bridge 白名单内。
 ros2 launch brain launch.py sim:=true \
   robot_name:=robot_01 team_id:=29 player_id:=1 role:=goal_keeper \
+  odom_source:=legacy \
   sim_profile:="$PWD/$RUN/brain/sim_profile.yaml"
 ```
 

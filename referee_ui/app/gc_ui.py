@@ -37,7 +37,9 @@ HTTP 接口:
             wait_kicker=true 时 GET_READY 挂起，等发球方到位信号后进 SET）
         {"cmd":"kicker_ready"}                      发球方已就位（放行挂起的 GET_READY）
         {"cmd":"cancel_freekick"}                     打断任意球时序
-        {"cmd":"goal_restart"}                        手动触发重开仪式
+        {"cmd":"goal_ready"}                         进球重开就位放行（结束挂起的 READY）
+        {"cmd":"goal_restart","wait_ready":bool}    手动触发重开仪式
+            （wait_ready 缺省用面板开关 wait_goal_ready）
         {"cmd":"reset_scores"}                        比分清零
 """
 from __future__ import annotations
@@ -45,6 +47,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -59,6 +62,8 @@ if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)          # 兼容 `python3 -m` / 从别处启动脚本
 
 from referee_core import (  # noqa: E402  同目录模块：HL v12 协议 + 裁判机状态机
+    GOAL_READY_MIN_HOLD,
+    GOAL_READY_TIMEOUT,
     SECONDARY_NAMES,
     STATE2_DIRECT_FREEKICK,
     RefereeSim,
@@ -111,12 +116,18 @@ def apply_command(ref: RefereeSim, payload: dict) -> dict:
         ref.note_kicker_ready()
         return {"ok": True, "cmd": cmd}
 
+    if cmd == "goal_ready":
+        # 进球重开 READY 的就位放行（面板按钮 / 外部判罚程序）
+        ref.note_goal_ready()
+        return {"ok": True, "cmd": cmd}
+
     if cmd == "cancel_freekick":
         ref.cancel_freekick()
         return {"ok": True, "cmd": cmd}
 
     if cmd == "goal_restart":
-        ref.begin_goal_restart()
+        wait = payload.get("wait_ready")
+        ref.begin_goal_restart(wait_ready=None if wait is None else bool(wait))
         return {"ok": True, "cmd": cmd}
 
     if cmd == "reset_scores":
@@ -134,6 +145,23 @@ class RefereeUiHandler(BaseHTTPRequestHandler):
     poses: "PoseWatch | None" = None
     web_dir: str = ""
     server_version = "referee-ui/1.0"
+    # 面板是 500ms(snapshot) + 250ms(poses) 双轮询：默认 HTTP/1.0 会让每个
+    # 轮询都重新建 TCP（WSL2 localhost 转发下每次握手都有额外开销），故用
+    # HTTP/1.1 持久连接；所有响应都已带 Content-Length，可安全复用。
+    protocol_version = "HTTP/1.1"
+    timeout = 65            # 空闲连接 65s 后回收，避免长连接线程常驻
+
+    def setup(self) -> None:
+        """持久连接下必需 TCP_NODELAY。
+
+        send_response / send_header / write 是多次小写入，持久连接上若开
+        Nagle + 延迟 ACK，每个轮询会多出 ~40ms（实测 p50 从 5ms 挠到 44ms）。
+        """
+        super().setup()
+        try:
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
 
     # ---- 工具 -----------------------------------------------------------
     def _send_json(self, obj: dict, status: int = 200) -> None:
@@ -143,7 +171,10 @@ class RefereeUiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def _send_file(self, path: str) -> None:
         try:
@@ -158,7 +189,10 @@ class RefereeUiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     # ---- 请求处理 --------------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802（http.server 命名约定）
@@ -214,6 +248,19 @@ class RefereeUiHandler(BaseHTTPRequestHandler):
         sys.stderr.write(f"[http] {msg}\n")
 
 
+class RefereeHttpServer(ThreadingHTTPServer):
+    """面板 HTTP 服务：持久连接 + 更大的 accept 队列。
+
+    ThreadingHTTPServer 默认 request_queue_size=5（accept backlog）。多标签页或
+    浏览器一条 origin 的 6 条并发连接叠起来就会溢出，表现为 SYN 重传导致的
+    秒级卡顿（压测中曾复现 1.0s 长尾），这里放宽到 128。
+    """
+
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 128
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="独立裁判机 UI（网页面板 + HL v12 UDP 发送，无 ROS 依赖）")
@@ -241,6 +288,14 @@ def main(argv=None) -> int:
                     help="位姿离线判定秒数（默认 3.0，面板灰显）")
     ap.add_argument("--no-pose-watch", action="store_true",
                     help="关闭内嵌位姿监视（释放 3940，供独立 pose_watch.py 使用）")
+    ap.add_argument("--no-goal-ready-wait", action="store_true",
+                    help="关闭进球重开就位闸门（回到固定 READY 10s 盲推进）")
+    ap.add_argument("--goal-ready-min-hold", type=float, default=GOAL_READY_MIN_HOLD,
+                    help=f"进球重开最短保持秒数（默认 {GOAL_READY_MIN_HOLD:g}，"
+                         "防进球瞬间原地未动就被判就位）")
+    ap.add_argument("--goal-ready-timeout", type=float, default=GOAL_READY_TIMEOUT,
+                    help=f"进球重开就位兜底放行秒数（默认 {GOAL_READY_TIMEOUT:g}；"
+                         "0 = 不兜底，不推荐）")
     args = ap.parse_args(argv)
 
     web_dir = os.path.join(UI_ROOT, "web")
@@ -251,6 +306,11 @@ def main(argv=None) -> int:
     ref = RefereeSim(target=args.target, port=args.port, team_id=args.team_id,
                      opponent_team_id=args.opponent_team_id, player_id=args.player_id,
                      players_per_team=args.players_per_team)
+    # 就位闸门：面板默认开（进球后 READY 挂起等操作员放行）
+    ref.update({"wait_goal_ready": not args.no_goal_ready_wait,
+                "goal_ready_min_hold": args.goal_ready_min_hold,
+                "goal_ready_timeout": (args.goal_ready_timeout
+                                       if args.goal_ready_timeout > 0 else None)})
     ref.start()
 
     watch = None
@@ -280,8 +340,7 @@ def main(argv=None) -> int:
     RefereeUiHandler.watch = watch
     RefereeUiHandler.poses = poses
     RefereeUiHandler.web_dir = web_dir
-    httpd = ThreadingHTTPServer((args.bind, args.http_port), RefereeUiHandler)
-    httpd.daemon_threads = True
+    httpd = RefereeHttpServer((args.bind, args.http_port), RefereeUiHandler)
 
     shown = "localhost" if args.bind in ("0.0.0.0", "::") else args.bind
     print("=" * 64, flush=True)
@@ -295,6 +354,10 @@ def main(argv=None) -> int:
     print("  位置:     " + (f"UDP {args.pose_port} 位姿监听中（陈旧 {args.pose_stale}s / "
           f"离线 {args.pose_timeout}s）"
           if poses else "位置监视关闭（--no-pose-watch 或 3940 被占）"), flush=True)
+    print("  就位闸门: " + (f"进球重开 READY 挂起等放行（最短 "
+          f"{args.goal_ready_min_hold:g}s / 兜底 {args.goal_ready_timeout:g}s，"
+          f"面板可关）"
+          if not args.no_goal_ready_wait else "关闭（固定 READY 10s 盲推进）"), flush=True)
     print("  配合:     ros2 launch game_controller launch.py（域 100）", flush=True)
     print("  说明:     发送开关/自动时间线/手动执法均在面板操作；Ctrl+C 退出", flush=True)
     print("=" * 64, flush=True)

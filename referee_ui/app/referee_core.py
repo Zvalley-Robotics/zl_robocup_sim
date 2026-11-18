@@ -101,6 +101,18 @@ FREEKICK_READY_TIMEOUT = 30.0
 # 时长与 TIMELINE 的 READY/SET 阶段一致）
 GOAL_RESTART_STAGES = [(STATE_READY, 10.0), (STATE_SET, 5.0)]
 
+# 进球重开的就位闸门（P0 = 手动放行）：进球后 READY 不再盲等 10s，而是挂起
+# 等「全部机器人已回到位置」的放行信号（面板按钮 / HTTP {"cmd":"goal_ready"}），
+# 信号到达即进 SET（SET 保留完整时长）。进球瞬间各机多半还在对方半场、速度已
+# 归零，纯计时推进必然出现「没回位就 SET/PLAYING」，故加闸门：
+#   GOAL_READY_MIN_HOLD   最短保持（防进球瞬间「原地没动」被立即判成就位）
+#   GOAL_READY_TIMEOUT    兜底放行上限（防机器人故障把比赛永久挂死）
+#   GOAL_READY_WAIT_DEFAULT 默认关：sim_console 无操作员，保持原固定计时行为；
+#                         裁判机面板由 gc_ui.py 显式开启
+GOAL_READY_MIN_HOLD = 3.0
+GOAL_READY_TIMEOUT = 30.0
+GOAL_READY_WAIT_DEFAULT = False
+
 
 # ---------------------------------------------------------------------------
 # HL v12 结构体（ctypes 复刻；_pack_=1 与 C 布局逐字节一致）
@@ -254,6 +266,15 @@ class RefereeSim:
         self._gr_stage = None
         self._gr_stage_start = 0.0
 
+        # 进球重开就位闸门：_gr_wait_ready = READY 正挂起等放行、
+        # _gr_ready = 已收到放行信号、_gr_gate_start = 闸门起点（两条推进路径共用）
+        self.wait_goal_ready = GOAL_READY_WAIT_DEFAULT
+        self.goal_ready_min_hold = GOAL_READY_MIN_HOLD
+        self.goal_ready_timeout = GOAL_READY_TIMEOUT
+        self._gr_wait_ready = False
+        self._gr_ready = False
+        self._gr_gate_start = 0.0
+
         # 比赛时钟游标：secs_remaining 仅在 PLAYING 期间按真实时间递减
         self._clock_last = time.monotonic()
         self._clock_acc = 0.0
@@ -293,12 +314,29 @@ class RefereeSim:
                 self._fk_wait_kicker = False
                 self._fk_kicker_ready = False
                 self._gr_stage = None
+                self._gr_wait_ready = False
+                self._gr_ready = False
             if "enabled" in patch:
                 self.enabled = bool(patch["enabled"])
+            if "wait_goal_ready" in patch:
+                self.wait_goal_ready = bool(patch["wait_goal_ready"])
+            if "goal_ready_min_hold" in patch:
+                try:
+                    self.goal_ready_min_hold = max(0.0, float(patch["goal_ready_min_hold"]))
+                except (TypeError, ValueError):
+                    pass
+            if "goal_ready_timeout" in patch:
+                # None = 不设兜底（不推荐：机器人故障会让比赛永久挂起）
+                try:
+                    v = patch["goal_ready_timeout"]
+                    self.goal_ready_timeout = None if v is None else max(0.0, float(v))
+                except (TypeError, ValueError):
+                    pass
             if "auto" in patch:
                 new_auto = bool(patch["auto"])
                 if new_auto and not self.auto:
                     # 对齐到当前状态所在阶段重新计时；重开仪式改由时间线推进
+                    # （已挂起的就位闸门保留：_advance_auto 同样受闸门约束）
                     self._phase_index = 0
                     for i, (st, _d, _n) in enumerate(TIMELINE):
                         if st == self.state:
@@ -306,6 +344,10 @@ class RefereeSim:
                             break
                     self._phase_start = time.monotonic()
                     self._gr_stage = None
+                elif not new_auto and self.auto and self._gr_wait_ready:
+                    # auto 关闭时把挂起的闸门接到一次性序列，避免停在 READY
+                    self._gr_stage = 0
+                    self._gr_stage_start = time.monotonic()
                 self.auto = new_auto
             if "state" in patch:
                 try:
@@ -392,6 +434,28 @@ class RefereeSim:
         with self._lock:
             self._fk_kicker_ready = True
 
+    def note_goal_ready(self) -> None:
+        """进球重开的就位放行信号（面板「就位完成 → 放行」/ 外部判罚程序）:
+        放行挂起的 READY，立即进入 SET。"""
+        with self._lock:
+            self._gr_ready = True
+
+    def _goal_gate_open(self, now: float) -> bool:
+        """进球重开 READY 闸门是否放行；调用方须持有锁。
+
+        未启用（wait_goal_ready=False，或当前不是进球重开）恒放行，保持旧
+        固定计时行为。启用时必须同时满足：已过最短保持 + 已收到放行信号；
+        兜底超时到点强制放行，防机器人故障把比赛挂死。
+        """
+        if not self._gr_wait_ready:
+            return True
+        if now - self._gr_gate_start < self.goal_ready_min_hold:
+            return False
+        if self._gr_ready:
+            return True
+        return (self.goal_ready_timeout is not None
+                and now - self._gr_gate_start >= self.goal_ready_timeout)
+
     def cancel_freekick(self) -> None:
         """打断任意球时序并恢复常规比赛（进球/复位/手动介入/离开 PLAYING）。"""
         with self._lock:
@@ -449,8 +513,8 @@ class RefereeSim:
     def apply_goal(self, our_goals: int, opp_goals: int) -> None:
         """进球结算：比分累计 + 交换开球权（失球方开球）+ 重开仪式。
 
-        启用且处于 PLAYING 时进入重开仪式（READY → SET → PLAYING）；其余
-        状态仅结算比分与开球权（如仪式进行中再次进球，则继续原仪式）。
+        启用且处于 PLAYING 时进入重开仪式（READY →（就位放行）→ SET → PLAYING）；
+        其余状态仅结算比分与开球权（如仪式进行中再次进球，则继续原仪式）。
         """
         with self._lock:
             self.our_score = min(255, self.our_score + max(0, int(our_goals)))
@@ -469,16 +533,26 @@ class RefereeSim:
             if self.enabled and self.state == STATE_PLAYING:
                 self.begin_goal_restart()   # RLock 可重入
 
-    def begin_goal_restart(self) -> None:
+    def begin_goal_restart(self, wait_ready: "bool | None" = None) -> None:
         """进球重开入口：清判罚、状态置 READY（失球方开球由调用方设置）。
 
         auto 开启：把自动时间线对齐到 READY 阶段里程碑（随后由 _advance_auto
         推进 READY → SET → PLAYING）；auto 关闭：由 _gr_stage 一次性序列推进。
+
+        wait_ready=True 时两条推进路径的 READY 都不看时长——挂起等
+        note_goal_ready() 的放行信号（或兜底超时）后立即进入 SET；
+        None = 用实例配置 wait_goal_ready（面板默认开、sim_console 默认关）。
         """
         with self._lock:
             self.secondary_state = STATE2_NORMAL
             self.secondary_sub = 0
             self._fk_stage = None
+            self._fk_wait_kicker = False
+            self._fk_kicker_ready = False
+            self._gr_wait_ready = bool(self.wait_goal_ready if wait_ready is None
+                                       else wait_ready)
+            self._gr_ready = False
+            self._gr_gate_start = time.monotonic()
             self.state = STATE_READY
             if self.auto:
                 self._gr_stage = None
@@ -498,10 +572,24 @@ class RefereeSim:
             return
         if not self.enabled:
             self._gr_stage = None   # 停发即操作员接管
+            self._gr_wait_ready = False
+            self._gr_ready = False
             return
         while self._gr_stage is not None:
             st, dur = GOAL_RESTART_STAGES[self._gr_stage]
             self.state = st
+            if st == STATE_READY:
+                if not self._goal_gate_open(now):
+                    return                      # 挂起 READY，等就位放行 / 兜底超时
+                if self._gr_wait_ready:
+                    # 到位即走：以放行时刻为 SET 起点，SET 保留完整时长
+                    self._gr_wait_ready = False
+                    self._gr_stage += 1
+                    self._gr_stage_start = now
+                    if self._gr_stage >= len(GOAL_RESTART_STAGES):
+                        self._gr_stage = None
+                        self.state = STATE_PLAYING
+                    continue
             if now - self._gr_stage_start < dur:
                 return
             self._gr_stage_start += dur
@@ -619,6 +707,15 @@ class RefereeSim:
         while True:
             idx = self._phase_index % len(TIMELINE)
             _state, dur, _name = TIMELINE[idx]
+            if _state == STATE_READY and self._gr_wait_ready:
+                # 进球重开的 READY 里程碑同样受就位闸门约束（auto 路径不能盲推进）
+                if not self._goal_gate_open(now):
+                    return
+                self._gr_wait_ready = False
+                self._phase_index = (idx + 1) % len(TIMELINE)
+                self._phase_start = now
+                self.state = TIMELINE[self._phase_index][0]
+                continue
             if now - self._phase_start < dur:
                 break
             self._phase_index = (idx + 1) % len(TIMELINE)
@@ -658,7 +755,9 @@ class RefereeSim:
     # -- 快照 --------------------------------------------------------------
     def snapshot(self) -> dict:
         with self._lock:
-            age = (time.monotonic() - self._last_send_ts) if self._last_send_ts else None
+            now = time.monotonic()
+            age = (now - self._last_send_ts) if self._last_send_ts else None
+            gate_elapsed = (now - self._gr_gate_start) if self._gr_wait_ready else None
             return {
                 "enabled": self.enabled,
                 "auto": self.auto,
@@ -673,6 +772,16 @@ class RefereeSim:
                                        and not self._fk_kicker_ready),
                 "kicker_ready": self._fk_kicker_ready,
                 "goal_restart_stage": self._gr_stage,
+                # 进球重开就位闸门（P0：手动放行）
+                "wait_goal_ready": self.wait_goal_ready,
+                "goal_ready_waiting": self._gr_wait_ready,
+                "goal_ready": self._gr_ready,
+                "goal_ready_elapsed": (round(gate_elapsed, 1)
+                                       if gate_elapsed is not None else None),
+                "goal_ready_timeout_in": (
+                    round(max(0.0, self.goal_ready_timeout - gate_elapsed), 1)
+                    if gate_elapsed is not None and self.goal_ready_timeout is not None
+                    else None),
                 "kick_off_team": self.kick_off_team,
                 "our_score": self.our_score,
                 "opp_score": self.opp_score,

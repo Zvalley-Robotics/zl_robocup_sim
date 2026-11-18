@@ -83,6 +83,8 @@
   .hint.err { color: var(--red); }
   .hint.ok { color: var(--green); }
   .hint:empty { display: none; }
+  /* 行内复选标签（就位闸门开关等） */
+  .chk { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--dim); cursor: pointer; }
   .stage { color: var(--orange); font-size: 11.5px; margin: 6px 0 0; }
   .stage:empty { display: none; }
   /* 说明折叠：默认收起，展开后不影响主控区布局 */
@@ -208,8 +210,16 @@
         <button class="mini" data-score="opp:1">＋</button>
       </div>
       <p class="hint" id="op-msg"></p>
+      <div class="row">
+        <label class="lbl">就位闸门</label>
+        <label class="chk"><input type="checkbox" id="gr-wait">重开后等就位放行</label>
+        <button id="gr-ready" class="primary mini">就位完成 → 放行</button>
+      </div>
+      <p class="hint" id="gr-state"></p>
       <details class="tip"><summary>说明</summary>
-        <p>进球 +1 自动交换开球权，并启动重开仪式 READY 10s → SET 5s → PLAYING。</p>
+        <p>进球 +1 自动交换开球权；重开仪式 READY <b>挂起等就位放行</b>（最短 3s / 兜底 30s）
+           → SET 5s → PLAYING。机器人回到位置后再点「就位完成 → 放行」，
+           避免没回位就被推进到 SET/PLAYING；勾掉复选框则回到固定 READY 10s 计时。</p>
       </details>
     </section>
   </div>
@@ -257,7 +267,7 @@
           不启动任何自动计时。之后由裁判手动点 STOP → GET_READY → SET 推进，
           到位后点「结束判罚」清空二级状态恢复比赛。</p>
         <p>若外部判罚程序（match_official 等）正在跑自动时序，本页子状态按钮会置灰，
-          避免两边互相覆盖；进球重开仪式仍是自动 READY 10s → SET 5s → PLAYING。</p>
+          避免两边互相覆盖；进球重开仪式是 READY 等就位放行 → SET 5s → PLAYING。</p>
         <div class="row">
           <label class="lbl">二级状态</label>
           <select id="secondary"></select>
@@ -293,6 +303,8 @@
        <code>--no-robot-watch</code> 释放端口。</p>
     <p>逐球员罚下：勾选 = PENALTY_MANUAL（40s），未用槽位自动填 SUBSTITUTE，列表全量替换下发。</p>
     <p>自动时间线：INITIAL(5s) → READY(10s) → SET(5s) → PLAYING(60s) → FINISHED(3s) 循环。</p>
+    <p>进球重开：READY 挂起等「就位完成 → 放行」（最短 3s / 兜底 30s，勾选框可关）
+       → SET 5s → PLAYING，避免机器人没回位就被推进。</p>
     <p class="warnbox">⚠ 不能双源：若对侧仿真也发送 GC 数据，必须只保留一方发送（本面板可一键停发）。</p>
     <div class="row"><button class="primary" id="help-close">关闭</button></div>
   </div>
@@ -305,6 +317,59 @@ let S = null;              // 最近一次快照
 let lastOk = 0;            // 最近一次轮询成功时间
 let penBuilt = 0;          // 罚下复选已构建的 players_per_team
 
+// ---------------------------------------------------------------------
+// DOM 写入工具：面板每 500ms 全量刷新，若每次都无条件写 innerHTML /
+// value / className，会触发大量重排并打断正在操作的控件（下拉回弹、
+// 勾选跳变、hover 提示丢失），所以统一“值变了才写”。
+// ---------------------------------------------------------------------
+const REQ_TIMEOUT = 1500;  // 单请求超时（ms）
+const UI_HOLD = 800;       // 用户刚动过的控件，这段窗口内不用快照回写
+const uiHold = {};         // 控件 id -> 回写解禁时间戳
+
+function setText(id, val) {
+  const el = $(id);
+  const s = String(val);
+  if (el && el.textContent !== s) el.textContent = s;
+}
+
+function setChip(id, on) {          // on = true / false / null(中性灰)
+  const el = $(id);
+  const cls = "chip" + (on === null ? "" : on ? " on" : " off");
+  if (el && el.className !== cls) el.className = cls;
+}
+
+function toggleCls(el, cls, on) {
+  if (el && el.classList.contains(cls) !== on) el.classList.toggle(cls, on);
+}
+
+function noteUiEdit(id) { uiHold[id] = Date.now() + UI_HOLD; }
+function uiBusy(id) { return (uiHold[id] || 0) > Date.now(); }
+
+// 下拉：聚焦中或刚被用户改过时不用快照回写，避免选择被弹回
+function setSelectValue(el, val) {
+  const s = String(val);
+  if (document.activeElement === el || uiBusy(el.id) || el.value === s) return;
+  el.value = s;
+}
+
+function setInputValue(el, val) {
+  const s = String(val);
+  if (document.activeElement === el || el.value === s) return;
+  el.value = s;
+}
+
+// 带超时的 fetch：单个请求挂住不能把整条轮询链拖死
+async function fetchJson(url, init) {
+  const ac = new AbortController();
+  const tm = setTimeout(() => ac.abort(), REQ_TIMEOUT);
+  try {
+    const r = await fetch(url, Object.assign({cache: "no-store", signal: ac.signal}, init));
+    return await r.json();
+  } finally {
+    clearTimeout(tm);
+  }
+}
+
 const STATE_LABELS = {0: "INITIAL 备场", 1: "READY 入场", 2: "SET 待哨", 3: "PLAYING 比赛", 4: "FINISHED 结束"};
 const SEC2_LABELS = {
   0: "NONE", 3: "TIMEOUT", 4: "DIRECT_FREEKICK", 5: "INDIRECT_FREEKICK",
@@ -314,17 +379,18 @@ const SUB_LABELS = {0: "STOP", 1: "GET_READY", 2: "SET"};
 
 async function post(body, msgId) {
   try {
-    const r = await fetch("/api/command", {
+    const j = await fetchJson("/api/command", {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify(body)
     });
-    const j = await r.json();
-    if (!j.ok) setMsg("指令失败: " + (j.error || r.status), true, msgId);
+    if (!j.ok) setMsg("指令失败: " + (j.error || "HTTP 错误"), true, msgId);
     else setMsg("已下发: " + JSON.stringify(body), false, msgId);
   } catch (e) {
     setMsg("请求失败: " + e, true, msgId);
   }
-  poll();
+  // 这里只能做一次性刷新：调 poll() 会再起一条永不停止的轮询链，
+  // 点几次按钮就多出几倍请求量（旧版越用越卡的直接原因）。
+  refreshSnapshot();
 }
 
 function setMsg(text, isErr, msgId) {
@@ -352,7 +418,10 @@ function buildStatic() {
     o.value = v; o.textContent = label;
     sec.appendChild(o);
   });
-  sec.onchange = () => post({cmd: "patch", patch: {secondary_state: Number(sec.value)}});
+  sec.onchange = () => {
+    noteUiEdit("secondary");
+    post({cmd: "patch", patch: {secondary_state: Number(sec.value)}});
+  };
   // 子状态下拉
   const sub = $("sub");
   sub.innerHTML = "";
@@ -361,7 +430,10 @@ function buildStatic() {
     o.value = v; o.textContent = label;
     sub.appendChild(o);
   });
-  sub.onchange = () => post({cmd: "patch", patch: {secondary_sub: Number(sub.value)}});
+  sub.onchange = () => {
+    noteUiEdit("sub");
+    post({cmd: "patch", patch: {secondary_sub: Number(sub.value)}});
+  };
   // 一键判罚网格：每行一类判罚，左列我方发球、右列对手发球（点击即下发时序）
   const FK_ROWS = [[7, "角球"], [9, "界外球"], [8, "球门球"],
                    [4, "直接任意球"], [5, "间接任意球"], [6, "点球"]];
@@ -418,6 +490,11 @@ function buildStatic() {
   });
   $("fk-end").onclick = () => post({cmd: "cancel_freekick"}, "fk-msg");
   $("gr-start").onclick = () => post({cmd: "goal_restart"}, "fk-msg");
+  $("gr-ready").onclick = () => post({cmd: "goal_ready"}, "op-msg");
+  $("gr-wait").onchange = () => {
+    noteUiEdit("gr-wait");
+    post({cmd: "patch", patch: {wait_goal_ready: $("gr-wait").checked}});
+  };
   $("goal-our").onclick = () => post({cmd: "goal", side: "our"});
   $("goal-opp").onclick = () => post({cmd: "goal", side: "opp"});
   $("scores-reset").onclick = () => post({cmd: "reset_scores"});
@@ -443,6 +520,7 @@ function buildPenalties(n) {
       cb.dataset.num = i;
       cb.onchange = () => {
         const side = cb.dataset.side;
+        noteUiEdit("pen-" + side);
         const list = [];
         box.querySelectorAll("input").forEach((x) => {
           if (x.checked) list.push(Number(x.dataset.num));
@@ -460,22 +538,25 @@ function buildPenalties(n) {
 
 function render() {
   if (!S) return;
+  // 就位闸门已等待秒数（null = 未挂起）
+  const grElapsed = (S.goal_ready_elapsed === null || S.goal_ready_elapsed === undefined)
+    ? 0 : S.goal_ready_elapsed;
   // 连接与开关
-  $("chip-conn").className = "chip " + (Date.now() - lastOk < 2500 ? "on" : "off");
-  $("chip-enabled").className = "chip " + (S.enabled ? "on" : "off");
-  $("chip-auto").className = "chip " + (S.auto ? "on" : "off");
-  $("v-enabled").textContent = S.enabled ? "开" : "关";
-  $("v-auto").textContent = S.auto ? "开" : "关";
-  $("v-sent").textContent = S.sent_count;
-  $("v-target").textContent = S.target;
+  setChip("chip-conn", Date.now() - lastOk < 2500);
+  setChip("chip-enabled", S.enabled);
+  setChip("chip-auto", S.auto);
+  setText("v-enabled", S.enabled ? "开" : "关");
+  setText("v-auto", S.auto ? "开" : "关");
+  setText("v-sent", S.sent_count);
+  setText("v-target", S.target);
 
   // 状态按钮高亮
   document.querySelectorAll("#state-btns button").forEach((b) => {
-    b.classList.toggle("active", Number(b.dataset.state) === S.state);
+    toggleCls(b, "active", Number(b.dataset.state) === S.state);
   });
 
-  // 时钟输入（聚焦时不打断输入）
-  if (document.activeElement !== $("secs")) $("secs").value = S.secs_remaining;
+  // 时钟输入（聚焦中不回写，避免打断输入）
+  setInputValue($("secs"), S.secs_remaining);
 
   // 开球队伍（选项依赖队伍号，首次构建）
   const ko = $("kickoff");
@@ -485,96 +566,186 @@ function render() {
     mk(S.opponent_team_id, "对手 (" + S.opponent_team_id + ")");
     mk(255, "DROPBALL 抢球 (255)");
   }
-  ko.value = String(S.kick_off_team);
-  ko.onchange = () => post({cmd: "patch", patch: {kick_off_team: Number(ko.value)}});
+  setSelectValue(ko, S.kick_off_team);
+  ko.onchange = () => {
+    noteUiEdit("kickoff");
+    post({cmd: "patch", patch: {kick_off_team: Number(ko.value)}});
+  };
 
   // 二级状态与子状态
-  $("secondary").value = String(S.secondary_state);
+  setSelectValue($("secondary"), S.secondary_state);
   const showSub = S.secondary_state >= 4;
-  $("sub").style.display = showSub ? "" : "none";
-  if (showSub) $("sub").value = String(S.secondary_sub);
+  const subEl = $("sub");
+  const wantDisplay = showSub ? "" : "none";
+  if (subEl.style.display !== wantDisplay) subEl.style.display = wantDisplay;
+  if (showSub) setSelectValue(subEl, S.secondary_sub);
 
   // 时序进行提示
   let stage = "";
-  if (S.freekick_stage !== null && S.freekick_stage !== undefined) {
+  if (S.goal_ready_waiting) {
+    stage = "进球重开：READY 挂起等就位（" + grElapsed +
+      "s），机器人回位后点「就位完成 → 放行」";
+  } else if (S.freekick_stage !== null && S.freekick_stage !== undefined) {
     stage = "任意球时序进行中：stage " + S.freekick_stage + "（" +
       (SUB_LABELS[S.secondary_sub] || "?") + "）";
     if (S.waiting_kicker) stage += "，等待发球方就位…";
     else if (S.kicker_ready && S.freekick_stage < 2) stage += "，已收到就位信号";
     stage += "，推进完成后清空";
   } else if (S.goal_restart_stage !== null && S.goal_restart_stage !== undefined) {
-    stage = "进球重开仪式进行中：stage " + S.goal_restart_stage + "（READY→SET→PLAYING 自动推进）";
+    stage = "进球重开仪式进行中：stage " + S.goal_restart_stage + "（READY→SET→PLAYING）";
   } else if (S.secondary_state >= 4) {
     stage = "判罚中：" + (SEC2_LABELS[S.secondary_state] || "?") + " · " +
       (S.kick_off_team === S.team_id ? "我方" : "对手") + "发球 · 子状态 " +
       (SUB_LABELS[S.secondary_sub] || "?") + "（手动推进，点「结束判罚」恢复比赛）";
   }
-  $("stage-info").textContent = stage;
+  setText("stage-info", stage);
 
   // 判罚进行中：高亮当前判罚与子状态，并启用控件
   const penLive = S.secondary_state >= 4;
   const autoLive = S.freekick_stage !== null && S.freekick_stage !== undefined;
   document.querySelectorAll("#fk-grid button").forEach((b) => {
     const teamId = b.dataset.team === "our" ? S.team_id : S.opponent_team_id;
-    b.classList.toggle("live", penLive && Number(b.dataset.fk) === S.secondary_state
-                               && S.kick_off_team === teamId);
+    toggleCls(b, "live", penLive && Number(b.dataset.fk) === S.secondary_state
+                        && S.kick_off_team === teamId);
   });
   document.querySelectorAll("#sub-btns button").forEach((b) => {
-    b.classList.toggle("active", penLive && Number(b.dataset.sub) === S.secondary_sub);
-    b.disabled = !penLive || autoLive;      // 外部自动时序在跑时禁用手动推进
+    toggleCls(b, "active", penLive && Number(b.dataset.sub) === S.secondary_sub);
+    const dis = !penLive || autoLive;      // 外部自动时序在跑时禁用手动推进
+    if (b.disabled !== dis) b.disabled = dis;
   });
-  $("fk-end").disabled = !penLive;
+  if ($("fk-end").disabled !== !penLive) $("fk-end").disabled = !penLive;
 
   // 比分
-  $("score-our").textContent = S.our_score;
-  $("score-opp").textContent = S.opp_score;
+  setText("score-our", S.our_score);
+  setText("score-opp", S.opp_score);
+
+  // 进球重开就位闸门：开关回写 + 等待状态 + 放行按钮可用性
+  const grWait = $("gr-wait");
+  if (!uiBusy("gr-wait")) {
+    const want = !!S.wait_goal_ready;
+    if (grWait.checked !== want) grWait.checked = want;
+  }
+  const grWaiting = !!S.goal_ready_waiting;
+  const grBtn = $("gr-ready");
+  if (grBtn.disabled !== !grWaiting) grBtn.disabled = !grWaiting;
+  let grTxt = "";
+  if (grWaiting) {
+    grTxt = "READY 挂起等就位 " + grElapsed + "s";
+    if (S.goal_ready) grTxt += " · 已收到放行信号";
+    if (S.goal_ready_timeout_in !== null && S.goal_ready_timeout_in !== undefined)
+      grTxt += " · 兜底 " + S.goal_ready_timeout_in + "s 后强制放行";
+  }
+  setText("gr-state", grTxt);
 
   // 实机在线状态（robots = robot_watch.RobotWatch 快照；null = 监视未启用）
-  const rs = S.robots;
-  const rbox = $("robot-rows");
-  if (!rs) {
-    $("chip-robots").className = "chip";
-    $("v-robots").textContent = "off";
-    rbox.innerHTML = '<p class="hint">3939 监视未启用（端口被占或启动时加了 --no-robot-watch）。</p>';
-  } else if (rs.list.length === 0) {
-    $("chip-robots").className = "chip";
-    $("v-robots").textContent = "0/" + rs.total;
-    rbox.innerHTML = '<p class="hint">暂无 RGrt 心跳——检查各 brain 的 game_control_ip 是否指向本机。</p>';
-  } else {
-    $("chip-robots").className = "chip " + (rs.online === rs.total ? "on" : "off");
-    $("v-robots").textContent = rs.online + "/" + rs.total;
-    rbox.innerHTML = rs.list.map((r) => {
-      const age = r.online ? r.age_sec.toFixed(1) + "s" : "离线 " + r.age_sec.toFixed(0) + "s";
-      const tip = "team " + r.team + " · P" + r.player + " · " + r.message_name +
-        " · " + r.count + " 包 · " + r.addr;
-      return '<div class="rchip' + (r.online ? "" : " dim") + '" title="' + tip + '">' +
-        '<span class="rdot' + (r.online ? " on" : "") + '"></span>' +
-        "<b>" + r.team + "·P" + r.player + "</b>" +
-        '<span class="age">' + age + "</span></div>";
-    }).join("");
-  }
+  renderRobots(S.robots);
 
-  // 罚下
+  // 罚下（刚点过的 800ms 内不回写，避免勾选被旧快照弹回）
   if (penBuilt !== S.players_per_team) buildPenalties(S.players_per_team);
   ["our", "opp"].forEach((side) => {
     const set = new Set(side === "our" ? S.penalize_our_players : S.penalize_opp_players);
+    const hold = uiBusy("pen-" + side);
     document.querySelectorAll("#pen-" + side + " input").forEach((cb) => {
-      cb.checked = set.has(Number(cb.dataset.num));
+      const want = set.has(Number(cb.dataset.num));
+      if (!hold && cb.checked !== want) cb.checked = want;
     });
   });
 }
 
-async function poll() {
-  try {
-    const r = await fetch("/api/snapshot", {cache: "no-store"});
-    S = await r.json();
-    lastOk = Date.now();
-    $("chip-conn").className = "chip on";
-    render();
-  } catch (e) {
-    $("chip-conn").className = "chip off";
+// 实机在线列表：增量更新。旧版每 500ms 重建整个 innerHTML，会让 hover 提示
+// 闪烁、列表重排，并丢失鼠标所在行。
+let robotsDom = null;      // key "team-player" -> {wrap, dot, name, age}
+let robotsHint = null;     // 当前展示的提示节点（null = 正在展示机器人块）
+
+function showRobotsHint(text) {
+  const rbox = $("robot-rows");
+  if (!robotsHint) {
+    rbox.innerHTML = "";
+    const p = document.createElement("p");
+    p.className = "hint";
+    rbox.appendChild(p);
+    robotsHint = p;
+    robotsDom = null;
   }
-  setTimeout(poll, 500);
+  if (robotsHint.textContent !== text) robotsHint.textContent = text;
+}
+
+function renderRobots(rs) {
+  const rbox = $("robot-rows");
+  if (!rs) {
+    setChip("chip-robots", null);
+    setText("v-robots", "off");
+    showRobotsHint("3939 监视未启用（端口被占或启动时加了 --no-robot-watch）。");
+    return;
+  }
+  if (rs.list.length === 0) {
+    setChip("chip-robots", null);
+    setText("v-robots", "0/" + rs.total);
+    showRobotsHint("暂无 RGrt 心跳——检查各 brain 的 game_control_ip 是否指向本机。");
+    return;
+  }
+  setChip("chip-robots", rs.online === rs.total);
+  setText("v-robots", rs.online + "/" + rs.total);
+  if (robotsHint) {                       // 从提示态切回列表态
+    rbox.innerHTML = "";
+    robotsHint = null;
+    robotsDom = null;
+  }
+  if (!robotsDom) robotsDom = new Map();
+  const seen = new Set();
+  rs.list.forEach((r) => {
+    const key = r.team + "-" + r.player;
+    seen.add(key);
+    let row = robotsDom.get(key);
+    if (!row) {
+      const wrap = document.createElement("div");
+      const dot = document.createElement("span");
+      const name = document.createElement("b");
+      const age = document.createElement("span");
+      dot.className = "rdot";
+      age.className = "age";
+      wrap.appendChild(dot);
+      wrap.appendChild(name);
+      wrap.appendChild(age);
+      rbox.appendChild(wrap);
+      row = {wrap, dot, name, age};
+      robotsDom.set(key, row);
+    }
+    const cls = "rchip" + (r.online ? "" : " dim");
+    if (row.wrap.className !== cls) row.wrap.className = cls;
+    const tip = "team " + r.team + " · P" + r.player + " · " + r.message_name +
+      " · " + r.count + " 包 · " + r.addr;
+    if (row.wrap.title !== tip) row.wrap.title = tip;
+    const dcls = "rdot" + (r.online ? " on" : "");
+    if (row.dot.className !== dcls) row.dot.className = dcls;
+    const ntxt = r.team + "·P" + r.player;
+    if (row.name.textContent !== ntxt) row.name.textContent = ntxt;
+    const atxt = r.online ? r.age_sec.toFixed(1) + "s" : "离线 " + r.age_sec.toFixed(0) + "s";
+    if (row.age.textContent !== atxt) row.age.textContent = atxt;
+  });
+  [...robotsDom.keys()].forEach((k) => {
+    if (!seen.has(k)) { robotsDom.get(k).wrap.remove(); robotsDom.delete(k); }
+  });
+}
+
+async function refreshSnapshot() {
+  try {
+    S = await fetchJson("/api/snapshot");
+    lastOk = Date.now();
+    setChip("chip-conn", true);
+    render();
+    return true;
+  } catch (e) {
+    setChip("chip-conn", false);
+    return false;
+  }
+}
+
+// 单链轮询：post() 只调 refreshSnapshot()，这里始终只有一条 setTimeout 循环；
+// 页面切到后台时降频，避免无谓占用 WSL2 localhost 中继与 CPU。
+async function poll() {
+  if (!document.hidden) await refreshSnapshot();
+  setTimeout(poll, document.hidden ? 1500 : 500);
 }
 
 // =====================================================================
@@ -611,7 +782,9 @@ function updateTrails(list, now) {
 function drawPositions() {
   const cv = $("field-canvas");
   if (!cv) return;
-  const dpr = window.devicePixelRatio || 1;
+  // 设备像素比封顶 2：高分屏（dpr=3）下像素量翻 2.25 倍，WSL2 里每帧
+  // 清屏 + 重绘的开销都落在浏览器合成线程上，而 2x 对场地线条已足够。
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
   // 画布尺寸完全由 flex 容器决定（CSS 绝对定位 inset:0），这里只读不写回
   const cssW = cv.clientWidth || 640;
   const cssH = cv.clientHeight || 320;
@@ -764,43 +937,57 @@ function drawPositions() {
 
 function renderPoses() {
   if (!P) {
-    $("chip-poses").className = "chip off";
-    $("v-poses").textContent = "--";
-    $("pose-summary").textContent = "位置监视未连接";
+    setChip("chip-poses", false);
+    setText("v-poses", "--");
+    setText("pose-summary", "位置监视未连接");
   } else if (P.enabled === false) {
-    $("chip-poses").className = "chip";
-    $("v-poses").textContent = "off";
-    $("pose-summary").textContent = "位置监视未启用（--no-pose-watch 或 3940 被占）";
+    setChip("chip-poses", null);
+    setText("v-poses", "off");
+    setText("pose-summary", "位置监视未启用（--no-pose-watch 或 3940 被占）");
   } else {
-    $("chip-poses").className = "chip " + (P.fresh > 0 ? "on" : "off");
-    $("v-poses").textContent = P.fresh + "/" + P.total;
+    setChip("chip-poses", P.fresh > 0);
+    setText("v-poses", P.fresh + "/" + P.total);
     const gaps = (P.list || []).reduce((s, r) => s + (r.gaps || 0), 0);
     const nOur = (P.list || []).filter((r) => r.is_our !== false).length;
     const nOpp = (P.list || []).length - nOur;
-    $("pose-summary").textContent =
+    setText("pose-summary",
       "我方 " + nOur + " · 对手 " + nOpp + " · 新鲜 " + P.fresh + "/" + P.total +
-      " · 丢包 " + gaps + " · " + P.listening;
+      " · 丢包 " + gaps + " · " + P.listening);
   }
   drawPositions();
 }
 
 async function pollPoses() {
-  try {
-    const r = await fetch("/api/poses", {cache: "no-store"});
-    P = await r.json();
-  } catch (e) {
-    P = null;
+  if (!document.hidden) {              // 后台标签页不拉数据
+    try {
+      P = await fetchJson("/api/poses");
+    } catch (e) {
+      P = null;
+    }
+    renderPoses();
   }
-  renderPoses();
-  setTimeout(pollPoses, 200);
+  setTimeout(pollPoses, document.hidden ? 1000 : 250);
 }
 
-window.addEventListener("resize", () => drawPositions());
+// rAF 合并：ResizeObserver 与 resize 可能连续触发，合并成一帧只重绘一次，
+// 也避免“改 canvas 尺寸 → 容器变化 → 再触发观测”的回环抖动。
+let drawRaf = 0;
+function scheduleDraw() {
+  if (drawRaf) return;
+  drawRaf = requestAnimationFrame(() => { drawRaf = 0; drawPositions(); });
+}
+
+window.addEventListener("resize", scheduleDraw);
 // 容器高度随窗口/列宽变化（而非仅窗口 resize），用 ResizeObserver 跟随重绘
 if (window.ResizeObserver) {
   const wrap = document.querySelector(".field-wrap");
-  if (wrap) new ResizeObserver(() => drawPositions()).observe(wrap);
+  if (wrap) new ResizeObserver(scheduleDraw).observe(wrap);
 }
+
+// 回到前台立即补一次快照（轮询在后台是降频的）
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshSnapshot();
+});
 
 // 全页说明弹层
 $("help-btn").onclick = () => $("help").classList.add("show");
