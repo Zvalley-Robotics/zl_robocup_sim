@@ -35,6 +35,7 @@ python3 robot_assets/utils/gen_robocup_multi_xml.py --check  # 只校验（重�
 | 足球场（草坪/白线/双方球门/足球/放置预览点） | `Z01_std_football_player/xml/scene/soccer_field.xml`（**内联**，便于把足球放到场心） |
 | 纹理/材质/中圈网格 | `<include file="../../Z01_std_football_player/xml/scene/soccer_field_assets.xml"/>` |
 | 网格文件 | `<compiler meshdir="../../Z01_std_football_player/meshes/"/>`（该目录同时含机器人 STL 与 `center_circle_ring.obj`，零网格重复） |
+| 足球外观 | `xml/fifa_trionda_ball_world_cup_2026/`：`ball.obj`（由 `scene.gltf` 离线转换）+ `textures/basic_fx_baseColor.png`；主 XML 里新增 `trionda_ball_tex/mat/mesh` |
 
 ## 队伍配色
 
@@ -51,13 +52,29 @@ python3 robot_assets/utils/gen_robocup_multi_xml.py --check  # 只校验（重�
 - 改配色只改生成器的 `TEAM_COLORS` / `TEAM_OF_ROBOT`，然后重跑生成器；
   机器人本体（`Z01_std_parallel_ankle`）保持原样。
 
-与 `Z01_std_football_player` 的两处故意差异：
+## 足球外观（FIFA Trionda）
+
+- 资产目录 `xml/fifa_trionda_ball_world_cup_2026/` 来自 Sketchfab 模型
+  **FIFA TRIONDA Ball World Cup 2026**（作者 About PES，CC-BY-4.0，见
+  `license.txt`）。MuJoCo 3.1.1 不支持 glTF，也没有法线/金属度贴图通道，因此
+  `ball.obj` 由 `robot_assets/utils/gen_trionda_ball_obj.py` 离线转换：烘焙
+  glTF 节点变换、保留 `TEXCOORD_0`，顶点平均半径归一化到 0.11m；材质只使用
+  `basic_fx_baseColor.png`。
+- 物理碰撞仍是 `soccer_field.xml` 里的解析球体 `ball_geom`（球感不变）。它被
+  放到 geom group 3（查看器与深度相机默认隐藏 group 3~5），视觉由 group 0 的
+  `ball_visual` 网格提供；`density="0"` 保证不改变 0.4kg 质量与惯量。
+- 重新转换：`python3 robot_assets/utils/gen_trionda_ball_obj.py`（只更新
+  `ball.obj`）；若改了网格/材质路径，再重跑 `gen_robocup_multi_xml.py`。
+
+与 `Z01_std_football_player` 的三处故意差异：
 
 1. **足球位于场心 `(0, 0, 0.11)`**。football_player 把球藏在 `z=-100`，由它的
    "足球模式"显隐控制；RoboCup 场景里球常显，所以内联场地时改到场心。
 2. **放置预览点 `ball_preview` 藏在地面下方 1m**（而不是 `z=-100`）。原来藏在
    -100 会把模型包围盒撑到 107m（`stat.extent`），进而放大深度相机的远近平面；
    放到 -1m 后 `stat.extent≈23`，与场地尺度一致。
+3. **足球外观换成 FIFA Trionda 贴图**。football_player 保持蓝色 `ball_material`；
+   本模型在生成时隐藏碰撞球并叠加 `ball_visual` 网格（见上节）。
 
 ## 关键数字（`--check` 输出）
 

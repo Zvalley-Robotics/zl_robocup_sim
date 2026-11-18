@@ -4,8 +4,8 @@ Copyright 2026 robocup_sim contributors
 This product includes software developed by third parties:
 
 1. zl_robot (https://github.com/zhoujiechj/zl_robot)
-   - Version: zl_robot-v1.2.24
-   - Commit at vendor time: f0a22c0c59c7291cd7320c74ff9c3f90475e8fe5
+   - Version: zl_robot-v1.2.26
+   - Commit at vendor time: c00115f44cb94f7826e31cc5597fed54f92057f4
    - Note: the source worktree contained local changes when vendored.
    - Vendored: src/robot_sim/{mj_sim,sim_common,sim_z01_std_robocup},
      src/robot_assets/{Z01_std_robocup,Z01_std_football_player,Z01_std_parallel_ankle/xml,utils},
@@ -35,6 +35,18 @@ This product includes software developed by third parties:
    - referee_ui/app/{gc_ui.py,robot_watch.py,pose_watch.py,pose_reporter.py}
      and web/index.html are vendored and adapted.
    - License: Apache-2.0.
+
+4. "FIFA TRIONDA Ball World Cup 2026" (3D model)
+   - Source: https://sketchfab.com/3d-models/fifa-trionda-ball-world-cup-2026-4c577717c59f44a882c48c5d8b5e41f8
+   - Author: About PES (https://sketchfab.com/budioi9090)
+   - Vendored: src/robot_assets/Z01_std_robocup/xml/fifa_trionda_ball_world_cup_2026/
+     (scene.gltf, scene.bin, textures). ball.obj is derived from scene.gltf by
+     src/robot_assets/utils/gen_trionda_ball_obj.py.
+   - License: CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+   - Credit: This work is based on "FIFA TRIONDA Ball World Cup 2026"
+     (https://sketchfab.com/3d-models/fifa-trionda-ball-world-cup-2026-4c577717c59f44a882c48c5d8b5e41f8)
+     by About PES (https://sketchfab.com/budioi9090) licensed under CC-BY-4.0
+     (http://creativecommons.org/licenses/by/4.0/).
 
 MuJoCo 3.1.1 is bundled by mj_sim under the Apache License 2.0; see
 src/robot_sim/mj_sim/thirdparty/mujoco/LICENSE.

@@ -1,0 +1,348 @@
+{
+  "accessors": [
+    {
+      "bufferView": 2,
+      "componentType": 5126,
+      "count": 20028,
+      "max": [
+        0.1133311539888382,
+        0.1131461039185524,
+        0.11311393976211548
+      ],
+      "min": [
+        -0.11288970708847046,
+        -0.11271413415670395,
+        -0.11305581778287888
+      ],
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 2,
+      "byteOffset": 240336,
+      "componentType": 5126,
+      "count": 20028,
+      "max": [
+        0.9998313188552856,
+        0.9993104338645935,
+        0.9996776580810547
+      ],
+      "min": [
+        -0.9999303221702576,
+        -0.9990193247795105,
+        -0.9995788335800171
+      ],
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 3,
+      "componentType": 5126,
+      "count": 20028,
+      "max": [
+        0.9982256293296814,
+        0.9972633123397827,
+        0.9987490773200989,
+        1.0
+      ],
+      "min": [
+        -0.9998300075531006,
+        -0.9999040961265564,
+        -0.9998925924301147,
+        -1.0
+      ],
+      "type": "VEC4"
+    },
+    {
+      "bufferView": 1,
+      "componentType": 5126,
+      "count": 20028,
+      "max": [
+        0.98583984375,
+        0.98193359375
+      ],
+      "min": [
+        0.017486572265625,
+        0.00965118408203125
+      ],
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 1,
+      "byteOffset": 160224,
+      "componentType": 5126,
+      "count": 20028,
+      "max": [
+        0.98583984375,
+        0.98193359375
+      ],
+      "min": [
+        0.017486572265625,
+        0.00965118408203125
+      ],
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 1,
+      "byteOffset": 320448,
+      "componentType": 5126,
+      "count": 20028,
+      "max": [
+        0.98583984375,
+        0.98193359375
+      ],
+      "min": [
+        0.017486572265625,
+        0.00965118408203125
+      ],
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 1,
+      "byteOffset": 480672,
+      "componentType": 5126,
+      "count": 20028,
+      "max": [
+        0.98583984375,
+        0.98193359375
+      ],
+      "min": [
+        0.017486572265625,
+        0.00965118408203125
+      ],
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 1,
+      "byteOffset": 640896,
+      "componentType": 5126,
+      "count": 20028,
+      "max": [
+        0.98583984375,
+        0.98193359375
+      ],
+      "min": [
+        0.017486572265625,
+        0.00965118408203125
+      ],
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 0,
+      "componentType": 5125,
+      "count": 20028,
+      "type": "SCALAR"
+    }
+  ],
+  "asset": {
+    "extras": {
+      "author": "About PES (https://sketchfab.com/budioi9090)",
+      "license": "CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)",
+      "source": "https://sketchfab.com/3d-models/fifa-trionda-ball-world-cup-2026-4c577717c59f44a882c48c5d8b5e41f8",
+      "title": "FIFA TRIONDA Ball World Cup 2026"
+    },
+    "generator": "Sketchfab-16.85.0",
+    "version": "2.0"
+  },
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteLength": 80112,
+      "name": "floatBufferViews",
+      "target": 34963
+    },
+    {
+      "buffer": 0,
+      "byteLength": 801120,
+      "byteOffset": 80112,
+      "byteStride": 8,
+      "name": "floatBufferViews",
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 480672,
+      "byteOffset": 881232,
+      "byteStride": 12,
+      "name": "floatBufferViews",
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 320448,
+      "byteOffset": 1361904,
+      "byteStride": 16,
+      "name": "floatBufferViews",
+      "target": 34962
+    }
+  ],
+  "buffers": [
+    {
+      "byteLength": 1682352,
+      "uri": "scene.bin"
+    }
+  ],
+  "images": [
+    {
+      "uri": "textures/basic_fx_baseColor.png"
+    },
+    {
+      "uri": "textures/basic_fx_metallicRoughness.png"
+    },
+    {
+      "uri": "textures/basic_fx_normal.png"
+    }
+  ],
+  "materials": [
+    {
+      "doubleSided": true,
+      "name": "basic_fx",
+      "normalTexture": {
+        "index": 2
+      },
+      "pbrMetallicRoughness": {
+        "baseColorTexture": {
+          "index": 0
+        },
+        "metallicRoughnessTexture": {
+          "index": 1
+        }
+      }
+    }
+  ],
+  "meshes": [
+    {
+      "name": "Object_0",
+      "primitives": [
+        {
+          "attributes": {
+            "NORMAL": 1,
+            "POSITION": 0,
+            "TANGENT": 2,
+            "TEXCOORD_0": 3,
+            "TEXCOORD_1": 4,
+            "TEXCOORD_2": 5,
+            "TEXCOORD_3": 6,
+            "TEXCOORD_4": 7
+          },
+          "indices": 8,
+          "material": 0,
+          "mode": 4
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "children": [
+        1
+      ],
+      "matrix": [
+        -0.06767263263463974,
+        -1.0882589149487168e-17,
+        -2.9582639081647103e-33,
+        0.0,
+        -1.2082101041296553e-33,
+        2.590893212708253e-17,
+        -0.06767263263463974,
+        0.0,
+        1.0882589149487168e-17,
+        -0.06767263263463974,
+        -2.590893212708253e-17,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "name": "Sketchfab_model"
+    },
+    {
+      "children": [
+        2
+      ],
+      "name": "root"
+    },
+    {
+      "children": [
+        3
+      ],
+      "matrix": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        2.220446049250313e-16,
+        1.0,
+        0.0,
+        0.0,
+        -1.0,
+        2.220446049250313e-16,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "name": "GLTF_SceneRootNode"
+    },
+    {
+      "children": [
+        4
+      ],
+      "matrix": [
+        13.503615379333496,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        13.503615379333496,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        13.503615379333496,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "name": "Trionda Ball 2026_0"
+    },
+    {
+      "mesh": 0,
+      "name": "Object_4"
+    }
+  ],
+  "samplers": [
+    {
+      "magFilter": 9729,
+      "minFilter": 9987,
+      "wrapS": 10497,
+      "wrapT": 10497
+    }
+  ],
+  "scene": 0,
+  "scenes": [
+    {
+      "name": "Sketchfab_Scene",
+      "nodes": [
+        0
+      ]
+    }
+  ],
+  "textures": [
+    {
+      "sampler": 0,
+      "source": 0
+    },
+    {
+      "sampler": 0,
+      "source": 1
+    },
+    {
+      "sampler": 0,
+      "source": 2
+    }
+  ]
+}

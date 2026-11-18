@@ -47,6 +47,9 @@
     <texture name="texplane" type="2d" builtin="checker" width="512" height="512" rgb1="0.2 0.3 0.4" rgb2="0.1 0.15 0.2" mark="cross" markrgb="0.8 0.8 0.8" />
     <material name="matplane" texture="texplane" reflectance="0.3" texrepeat="1 1" texuniform="true" />
     <include file="../../Z01_std_football_player/xml/scene/soccer_field_assets.xml" />
+    <texture name="trionda_ball_tex" type="2d" file="fifa_trionda_ball_world_cup_2026/textures/basic_fx_baseColor.png" />
+    <material name="trionda_ball_mat" texture="trionda_ball_tex" specular="0.5" shininess="0.7" reflectance="0.1" />
+    <mesh name="trionda_ball_mesh" file="../../Z01_std_robocup/xml/fifa_trionda_ball_world_cup_2026/ball.obj" />
     <material name="team_blue_mat" rgba="0.10 0.30 0.85 1" />
     <material name="team_red_mat" rgba="0.85 0.12 0.10 1" />
   </asset>
@@ -115,7 +118,8 @@
     </body>
     <body name="soccer_ball" pos="0.0000 0.0000 0.1100">
       <freejoint name="ball_free_joint" />
-      <geom name="ball_geom" type="sphere" size="0.11" mass="0.4" material="ball_material" condim="6" friction="0.8 0.005 0.004" solref="0.02 1" solimp="0.9 0.95 0.001 0.5 2" priority="1" />
+      <geom name="ball_geom" type="sphere" size="0.11" mass="0.4" material="ball_material" condim="6" friction="0.8 0.005 0.004" solref="0.02 1" solimp="0.9 0.95 0.001 0.5 2" priority="1" group="3" />
+      <geom name="ball_visual" type="mesh" mesh="trionda_ball_mesh" material="trionda_ball_mat" contype="0" conaffinity="0" density="0" />
     </body>
     <body name="ball_preview" mocap="true" pos="0.0000 0.0000 -1.0000">
       <geom name="ball_preview_geom" type="sphere" size="0.05" rgba="1.0 0.85 0.0 0.8" contype="0" conaffinity="0" />

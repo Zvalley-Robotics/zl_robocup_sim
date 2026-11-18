@@ -22,6 +22,10 @@ football_player 的 scene/soccer_field_assets.xml；球场的 worldbody（草坪
 （football_player 把它藏在 z=-100 交给"足球模式"显隐控制），同时不改动
 football_player 的资产。include 都写在主文件里，因而不依赖"include 相对哪个目录解析"。
 
+足球外观在生成时额外叠加：FIFA Trionda 的带 UV 网格放在 group 0 负责显示，
+原解析碰撞球移到 group 3 隐藏（物理参数不变）；详见 BALL_* 常量与
+utils/gen_trionda_ball_obj.py。
+
 用法
 ----
     python3 robot_assets/utils/gen_robocup_multi_xml.py            # 生成
@@ -58,15 +62,38 @@ SOLVER_TOLERANCE = "1e-7"
 FIELD_XML_DIR = "../../Z01_std_football_player/xml/scene"
 FIELD_MESH_DIR = "../../Z01_std_football_player/meshes/"
 
+# 足球半径（与 soccer_field.xml 的 ball_geom size 一致）。
+BALL_RADIUS = 0.11
+
 # 足球的初始位置：RoboCup 场景里球常显，必须放在场心而不是"藏"到地下。
 # football_player 的 soccer_field.xml 把球放在 z=-100（由足球模式显隐控制），
 # 这里内联场地时把它改到场心，从而不改动 football_player 的资产。
-BALL_SPAWN = (0.0, 0.0, 0.11)
+BALL_SPAWN = (0.0, 0.0, BALL_RADIUS)
 # 放置预览点（mocap body，平时不可见）：football_player 藏在 z=-100，会把模型的
 # 包围盒撑到 107m（stat.extent）。放到地面下方 1m 即可（球半径 0.05，视觉上被
 # 草坪遮住），包围盒回到场地量级；它带来的深度相机 frustum 变化由下面的
 # VIS_MAP_* 显式对齐回 football_player 的标定。
 PREVIEW_HIDDEN_Z = -1.0
+
+# 足球外观：FIFA TRIONDA Ball World Cup 2026（CC-BY-4.0，见资产目录 license.txt）。
+# MuJoCo 3.1.1 不支持 glTF，也没有法线/金属度贴图通道，所以球体先用
+# utils/gen_trionda_ball_obj.py 离线转成带 UV 的 ball.obj（半径归一化到
+# BALL_RADIUS），这里只给材质用 baseColor 贴图。
+BALL_ASSET_SUBDIR = "fifa_trionda_ball_world_cup_2026"
+BALL_ASSET_DIR = os.path.join(ASSETS_DIR, "Z01_std_robocup", "xml", BALL_ASSET_SUBDIR)
+BALL_OBJ = os.path.join(BALL_ASSET_DIR, "ball.obj")
+BALL_TEXTURE = os.path.join(BALL_ASSET_DIR, "textures", "basic_fx_baseColor.png")
+BALL_VISUAL_GEOM = "ball_visual"
+BALL_VISUAL_MESH = "trionda_ball_mesh"
+BALL_VISUAL_MATERIAL = "trionda_ball_mat"
+BALL_VISUAL_TEXTURE = "trionda_ball_tex"
+
+# 资产在 XML 里的引用路径：贴图相对主 XML 目录（texturedir 默认空），网格相对
+# compiler meshdir（指向 football_player 的共享网格目录，需要跨回 robocup/xml）。
+MAIN_XML_DIR = os.path.dirname(DEFAULT_OUTPUT)
+FIELD_MESH_ABS = os.path.normpath(os.path.join(MAIN_XML_DIR, FIELD_MESH_DIR))
+BALL_TEXTURE_REL = os.path.relpath(BALL_TEXTURE, MAIN_XML_DIR).replace(os.sep, "/")
+BALL_MESH_REL = os.path.relpath(BALL_OBJ, FIELD_MESH_ABS).replace(os.sep, "/")
 
 # 引用型属性：它们的值是本机器人内部的 MuJoCo 对象名，必须与 name 同步加前缀。
 # mesh/material/texture/class/file/objtype 指向共享资产或类型，不能加前缀。
@@ -177,6 +204,32 @@ def indent(elem, level=0):
     elem.tail = pad
 
 
+def add_ball_visual(ball_body):
+  """给足球 body 加 FIFA Trionda 视觉网格，并隐藏原来的解析碰撞球。
+
+  碰撞必须继续用 sphere：mesh 碰撞走凸包，面数高且滚动手感会变。碰撞球放到
+  geom group 3（MuJoCo 默认隐藏 group 3~5，查看器与深度相机一致），视觉网格
+  留在默认的 group 0；density=0 保证它不改变球的 0.4kg 质量与惯量。
+  """
+  collision = None
+  for geom in ball_body.findall("geom"):
+    if geom.get("name") == "ball_geom":
+      collision = geom
+      break
+  if collision is None:
+    raise SystemExit("足球 body 里没有 ball_geom（碰撞球）")
+  collision.set("group", "3")
+  ET.SubElement(ball_body, "geom", {
+      "name": BALL_VISUAL_GEOM,
+      "type": "mesh",
+      "mesh": BALL_VISUAL_MESH,
+      "material": BALL_VISUAL_MATERIAL,
+      "contype": "0",
+      "conaffinity": "0",
+      "density": "0",
+  })
+
+
 def field_worldbody_elements(field_path):
   """读取球场场景的 worldbody 片段，并把足球放到场心（常显场景）。"""
   field_root = ET.parse(field_path).getroot()
@@ -189,6 +242,7 @@ def field_worldbody_elements(field_path):
   for body in elements:
     if body.get("name") == "soccer_ball":
       body.set("pos", "%.4f %.4f %.4f" % BALL_SPAWN)
+      add_ball_visual(body)
       seen_ball = True
     elif body.get("name") == "ball_preview":
       pos = body.get("pos", "0 0 0").split()
@@ -310,6 +364,14 @@ def build_main(parts, field_path, robot_count, njmax, nconmax):
   for child in list(parts["asset"]):
     asset_block.append(ET.fromstring(ET.tostring(child, encoding="unicode")))
   asset_block.append(ET.Element("include", {"file": "%s/soccer_field_assets.xml" % FIELD_XML_DIR}))
+  # 足球外观（FIFA Trionda）：贴图/材质/带 UV 网格；引用路径见 BALL_*_REL。
+  ET.SubElement(asset_block, "texture", {
+      "name": BALL_VISUAL_TEXTURE, "type": "2d", "file": BALL_TEXTURE_REL})
+  ET.SubElement(asset_block, "material", {
+      "name": BALL_VISUAL_MATERIAL, "texture": BALL_VISUAL_TEXTURE,
+      "specular": "0.5", "shininess": "0.7", "reflectance": "0.1"})
+  ET.SubElement(asset_block, "mesh", {
+      "name": BALL_VISUAL_MESH, "file": BALL_MESH_REL})
   # 队伍配色材质：供 robots/robot_0X.xml 的躯干 geom 引用。
   for team, rgba in TEAM_COLORS.items():
     ET.SubElement(asset_block, "material",
