@@ -13,9 +13,9 @@ match:
   players_per_team: 3
 
 robots:
-  - {name: robot_01, team: A, player_id: 1, role: goal_keeper, enabled: true,  control_host: sim-host, brain_host: sim-host}
+  - {name: robot_01, team: A, player_id: 1, role: goal_keeper, enabled: false,  control_host: sim-host, brain_host: sim-host}
   - {name: robot_02, team: A, player_id: 2, role: striker,     enabled: true,  control_host: sim-host, brain_host: sim-host}
-  - {name: robot_03, team: A, player_id: 3, role: striker,     enabled: true,  control_host: sim-host, brain_host: sim-host}
+  - {name: robot_03, team: A, player_id: 3, role: striker,     enabled: false,  control_host: sim-host, brain_host: sim-host}
   - {name: robot_04, team: B, player_id: 1, role: goal_keeper, enabled: false, control_host: sim-host, brain_host: sim-host}
-  - {name: robot_05, team: B, player_id: 2, role: striker,     enabled: false, control_host: sim-host, brain_host: sim-host}
+  - {name: robot_05, team: B, player_id: 2, role: striker,     enabled: true, control_host: sim-host, brain_host: sim-host}
   - {name: robot_06, team: B, player_id: 3, role: striker,     enabled: false, control_host: sim-host, brain_host: sim-host}
